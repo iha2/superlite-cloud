@@ -100,3 +100,44 @@ def test_timeout_removes_container():
 def test_rejects_injection(kw):
     with pytest.raises(ValueError):
         DockerRunner().argv(job(**kw))
+
+
+def _capture():
+    calls = []
+
+    def fake(argv, **kw):
+        calls.append((argv, kw))
+        if argv[1] == "run" and kw.get("timeout") == 1:
+            raise subprocess.TimeoutExpired(argv, 1)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    return calls, fake
+
+
+def test_docker_env_passthrough(monkeypatch):
+    for k in ("DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("DOCKER_HOST", "unix:///x/podman.sock")
+    monkeypatch.setenv("DOCKER_CONTEXT", "ctx")
+    monkeypatch.setenv("SOME_OTHER_SECRET", "nope")
+    calls, fake = _capture()
+    DockerRunner(run=fake).run(job(timeout_s=1))
+    run_env, rm_env = calls[0][1]["env"], calls[1][1]["env"]
+    assert calls[1][0][1:3] == ["rm", "-f"]
+    for env in (run_env, rm_env):
+        assert env["DOCKER_HOST"] == "unix:///x/podman.sock" and env["DOCKER_CONTEXT"] == "ctx"
+        assert "DOCKER_CONFIG" not in env and "SOME_OTHER_SECRET" not in env
+    assert run_env["ANTHROPIC_API_KEY"] == "sekret"
+    assert "ANTHROPIC_API_KEY" not in rm_env
+
+
+def test_docker_bin_from_env(monkeypatch):
+    monkeypatch.delenv("SLCLOUD_DOCKER_BIN", raising=False)
+    assert DockerRunner().argv(job())[0] == "docker"
+    monkeypatch.setenv("SLCLOUD_DOCKER_BIN", "podman")
+    assert DockerRunner().argv(job())[0] == "podman"
+    assert get_runner("docker").docker_bin == "podman"
+    calls, fake = _capture()
+    DockerRunner(run=fake).run(job(timeout_s=1))
+    assert calls[0][0][0] == "podman" and calls[1][0][:3] == ["podman", "rm", "-f"]
+    assert DockerRunner(docker_bin="nerdctl").argv(job())[0] == "nerdctl"

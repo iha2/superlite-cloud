@@ -60,6 +60,10 @@ Requirements: Docker with Compose, and a git repository your tasks can clone.
 
 Once connected, agents submit tasks through the `submit_task` MCP tool at `http://localhost:8787/mcp`. Each task starts with a plan. Reply `approve` to the plan to start the run.
 
+## Using Podman
+
+Sandboxes are started with the container CLI named by `SLCLOUD_DOCKER_BIN` (default `docker`). To use Podman, set `SLCLOUD_DOCKER_BIN=podman` and point `DOCKER_HOST` at the Podman API socket, for example `DOCKER_HOST=unix:///run/user/1000/podman/podman.sock`. `podman info` prints the socket path. `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `DOCKER_CERT_PATH` and `DOCKER_TLS_VERIFY` are passed through to the CLI. Job secrets are never passed to it except as `-e NAME` for the sandbox.
+
 ## Layout
 
 - `src/slcloud/` is the package. The CLI entry point is `slcloud`.

@@ -1,7 +1,9 @@
 import json
 import os
+import shutil
 import stat
 import subprocess
+import tempfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -122,8 +124,38 @@ def test_401_and_cross_workspace_404(env):
 
 @pytest.mark.skipif(os.environ.get("SLCLOUD_DOCKER_E2E") != "1", reason="needs docker")
 def test_docker_e2e():
-    r = subprocess.run(["docker", "info"], capture_output=True)
-    assert r.returncode == 0
+    from pathlib import Path
+
+    from slcloud.sandbox import DockerRunner, Job
+
+    # The workdir lives under $HOME, not tmp_path: a podman machine VM only shares $HOME with
+    # the host, so a pytest tmp dir would not be mountable into the sandbox container.
+    base = Path.home() / ".cache" / "slcloud-e2e"
+    base.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(dir=base))
+    work.chmod(0o777)  # the container user may differ from the host user
+    try:
+        (work / "in.txt").write_text("hello")
+        runner = DockerRunner()
+        image = "docker.io/library/alpine:3.20"
+
+        def run(cmd, timeout_s=120, env=None):
+            return runner.run(Job(image, cmd, env or {}, str(work), timeout_s=timeout_s))
+
+        r = run(["sh", "-c", 'cat in.txt; echo -n "$E2E_VAR" > out.txt; echo -n "$E2E_VAR"; '
+                             "grep CapEff /proc/self/status"], env={"E2E_VAR": "v-123"})
+        assert r.code == 0, r.stderr
+        assert r.stdout.startswith("hellov-123")  # mounted file readable, env var passed
+        assert (work / "out.txt").read_text() == "v-123"  # written back to the host
+        assert r.stdout.split("CapEff:")[1].strip() == "0000000000000000"
+        assert run(["sh", "-c", "exit 7"]).code == 7
+        t = run(["sleep", "30"], timeout_s=3)
+        assert t.timed_out is True
+        ps = subprocess.run([runner.docker_bin, "ps", "-a", "--format", "{{.Names}}"],
+                            capture_output=True, text=True, check=True)
+        assert not [n for n in ps.stdout.split() if n.startswith("slcloud-")]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def test_mcp_auth_isolation_and_no_secrets(env):

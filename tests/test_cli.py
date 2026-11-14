@@ -101,6 +101,56 @@ def test_sync_failure_keeps_offset(tmp_path, outbox):
     assert len(ok.calls) == 1
 
 
+def _real_outbox(tmp_path, monkeypatch, rows):
+    import os
+
+    monkeypatch.undo()
+    f = tmp_path / "outbox.jsonl"
+    f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return f
+
+
+def _run_real(tmp_path, f, post):
+    out, err = io.StringIO(), io.StringIO()
+    env = {"SLCLOUD_URL": URL, "SLCLOUD_TOKEN": "slc_ab", "HOME": str(tmp_path), "SLCLOUD_OUTBOX": str(f)}
+    code = cli.main(["sync"], http=post, env=env, stdin=io.StringIO(""), out=out, err=err)
+    return code, out.getvalue(), err.getvalue()
+
+
+GOOD = {"v": 1, "id": "a", "signal": "rework", "date": "2026-11-14"}
+
+
+def test_sync_skips_bad_row(tmp_path, monkeypatch):
+    bad = dict(GOOD, id="b", cmd="rm -rf /")
+    f = _real_outbox(tmp_path, monkeypatch, [GOOD, bad])
+    post = Poster(200)
+    code, out, err = _run_real(tmp_path, f, post)
+    assert code == 0
+    assert len(post.calls) == 1
+    assert [r["id"] for r in post.calls[0][3]["rows"]] == ["a"]
+    assert "skipped 1 rows" in err
+    assert "rm -rf" not in out + err
+    state = json.loads((tmp_path / ".config/slcloud/sync.json").read_text())
+    assert state[URL] == f.stat().st_size
+    code, out, err = _run_real(tmp_path, f, post)
+    assert code == 0
+    assert len(post.calls) == 1
+    assert "nothing to sync" in out
+
+
+def test_sync_only_bad_rows(tmp_path, monkeypatch):
+    bad = dict(GOOD, cmd="rm -rf /")
+    f = _real_outbox(tmp_path, monkeypatch, [bad])
+    post = Poster(200)
+    code, out, err = _run_real(tmp_path, f, post)
+    assert code == 0
+    assert post.calls == []
+    assert "skipped 1 rows" in err and "nothing to sync" in out
+    assert "rm -rf" not in out + err
+    state = json.loads((tmp_path / ".config/slcloud/sync.json").read_text())
+    assert state[URL] == f.stat().st_size
+
+
 def test_key_set_reads_stdin(tmp_path):
     post = Poster(200, {"provider": "anthropic", "last4": "cdef", "works": True, "message": "ok"})
     code, out, err = run(["key", "set", "anthropic"], post, stdin="sk-secret-abcdef\n", tmp=tmp_path)

@@ -28,7 +28,8 @@ _current: ContextVar[Principal | None] = ContextVar("slcloud_principal", default
 
 
 def _hash(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
+    # surrogatepass: a lone surrogate must hash (and then fail lookup), not raise
+    return hashlib.sha256(token.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _now() -> str:

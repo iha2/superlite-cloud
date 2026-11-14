@@ -8,6 +8,7 @@ import sys
 
 from slcloud import learning
 from slcloud.connect import AGENTS, connect_command
+from slcloud.errors import Rejected
 
 USAGE = "usage: slcloud init|token create|key set <provider>|connect <agent>|sync|serve|worker"
 
@@ -36,9 +37,18 @@ def _load_state(path: str) -> dict:
 
 
 def _save_state(path: str, state: dict) -> None:
+    # write a temp file then rename: a torn write must never wipe every URL's offset
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(state, f)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def _client(env: dict, err) -> tuple[str, str] | None:
@@ -59,7 +69,21 @@ def _sync(env, http, out, err) -> int:
     path = _state_path(env)
     state = _load_state(path)
     rows, new_offset = learning.outbox_rows(outbox, int(state.get(url, 0)))
+    good = []
+    for r in rows:
+        try:
+            learning.accept_row(r)
+        except (Rejected, ValueError):
+            continue  # never log row content
+        good.append(r)
+    skipped = len(rows) - len(good)
+    if skipped:
+        err.write(f"skipped {skipped} rows with fields not allowed\n")
+    rows = good
     if not rows:
+        if skipped:
+            state[url] = new_offset
+            _save_state(path, state)
         out.write("nothing to sync\n")
         return 0
     status, _ = http("POST", f"{url}/api/learn/rows", token, {"rows": rows})
@@ -132,7 +156,7 @@ def main(argv=None, *, http=None, env=None, stdin=None, out=None, err=None) -> i
             return _sync(env, http, out, err)
         if cmd == "key" and len(argv) == 3 and argv[1] == "set":
             return _key_set(argv[2], env, http, stdin, out, err)
-        if cmd in ("init", "serve", "worker") or (cmd == "token" and len(argv) == 4):
+        if cmd in ("init", "serve", "worker") or (cmd == "token" and len(argv) == 4 and argv[1] == "create"):
             return _server(argv, env, out)
     except Exception as e:  # never echo secrets: report the type only
         err.write(f"error: {type(e).__name__}\n")

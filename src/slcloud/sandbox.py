@@ -48,10 +48,24 @@ class ProcessRunner:
         return JobResult(p.returncode, p.stdout, p.stderr, False)
 
 
+# Client settings the container CLI needs to find its daemon. Never job.env secrets.
+_DOCKER_PASSTHROUGH = ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
+                       "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY")
+
+
 class DockerRunner:
-    def __init__(self, gvisor: bool = False, run=subprocess.run):
+    def __init__(self, gvisor: bool = False, run=subprocess.run, docker_bin: str | None = None):
         self.gvisor = gvisor
         self._run = run
+        self.docker_bin = docker_bin or os.environ.get("SLCLOUD_DOCKER_BIN") or "docker"
+
+    def _cli_env(self) -> dict[str, str]:
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+               "HOME": os.environ.get("HOME", "/")}
+        for k in _DOCKER_PASSTHROUGH:
+            if k in os.environ:
+                env[k] = os.environ[k]
+        return env
 
     def argv(self, job: Job) -> list[str]:
         if job.image.startswith("-") or not job.image:
@@ -61,7 +75,7 @@ class DockerRunner:
         for k in job.env:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
                 raise ValueError(f"invalid env name: {k!r}")
-        a = ["docker", "run", "--rm", "--cpus", str(job.cpus), "--memory", job.memory,
+        a = [self.docker_bin, "run", "--rm", "--cpus", str(job.cpus), "--memory", job.memory,
              "--pids-limit", "512", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
         if self.gvisor:
             a += ["--runtime", "runsc"]
@@ -71,8 +85,8 @@ class DockerRunner:
         return a + [job.image, *job.command]
 
     def run(self, job: Job) -> JobResult:
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-               "HOME": os.environ.get("HOME", "/"), **job.env}
+        cli_env = self._cli_env()
+        env = {**cli_env, **job.env}
         name = f"slcloud-{uuid.uuid4().hex[:12]}"
         argv = self.argv(job)
         argv[2:2] = ["--name", name]
@@ -81,7 +95,7 @@ class DockerRunner:
                           timeout=job.timeout_s)
         except subprocess.TimeoutExpired as e:
             try:
-                self._run(["docker", "rm", "-f", name], env=env, capture_output=True,
+                self._run([self.docker_bin, "rm", "-f", name], env=cli_env, capture_output=True,
                           text=True, timeout=30)
             except Exception:
                 pass
