@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>slcloud setup</title></head>
+<body>
+<h1>slcloud setup</h1>
+<p><label>Token <input id="token" type="password" autocomplete="off"></label>
+<button id="save">Use token</button></p>
+<h2>Agents</h2><ul id="agents"></ul>
+<h2>Provider keys</h2><ul id="keys"></ul>
+<p><select id="provider"><option>anthropic</option><option>openai</option><option>gemini</option><option>cursor</option></select>
+<input id="key" type="password" autocomplete="off"><button id="put">Save key</button></p>
+<p id="status"></p>
+<h2>Connect</h2>
+<p><select id="agent"><option>claude</option><option>codex</option><option>gemini</option><option>cursor</option></select>
+<button id="conn">Show command</button></p>
+<pre id="cmd"></pre>
+<script>
+const $ = (id) => document.getElementById(id);
+const hdr = () => ({"Authorization": "Bearer " + (sessionStorage.getItem("slc_token") || ""), "Content-Type": "application/json"});
+async function api(method, path, body) {
+  const r = await fetch(path, {method, headers: hdr(), body: body ? JSON.stringify(body) : undefined});
+  if (!r.ok) throw new Error(method + " " + path + " failed: " + r.status);
+  return r.json();
+}
+function fill(ul, items) {
+  ul.textContent = "";
+  for (const t of items) { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); }
+}
+async function load() {
+  try {
+    const a = await api("GET", "/api/agents");
+    fill($("agents"), a.map((x) => x.name + " " + (x.version || "not installed") + (x.superlite ? " (superlite " + x.superlite + ")" : "")));
+    const k = await api("GET", "/api/keys");
+    fill($("keys"), k.map((x) => x.provider + " ****" + x.last4));
+  } catch (e) { $("status").textContent = e.message; }
+}
+$("save").onclick = () => { sessionStorage.setItem("slc_token", $("token").value); $("token").value = ""; load(); };
+$("put").onclick = async () => {
+  try {
+    const r = await api("PUT", "/api/keys/" + $("provider").value, {key: $("key").value});
+    $("key").value = "";
+    $("status").textContent = r.provider + ": " + r.message;
+    load();
+  } catch (e) { $("status").textContent = e.message; }
+};
+$("conn").onclick = async () => {
+  try { $("cmd").textContent = (await api("GET", "/api/connect?agent=" + encodeURIComponent($("agent").value))).command; }
+  catch (e) { $("status").textContent = e.message; }
+};
+load();
+</script>
+</body></html>

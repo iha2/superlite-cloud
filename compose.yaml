@@ -1,0 +1,38 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      SLCLOUD_URL: ${SLCLOUD_URL:-http://localhost:8787}
+    command: ["slcloud", "serve"]
+    ports:
+      - "8787:8787"
+    volumes:
+      - slcloud-data:/data
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: slcloud-worker:0.1.0
+    env_file: .env
+    environment:
+      SLCLOUD_SANDBOX: docker
+      SLCLOUD_WORK: ${SLCLOUD_WORK:-/srv/slcloud/work}
+    command: ["slcloud", "worker"]
+    volumes:
+      - slcloud-data:/data
+      # The sandbox path must be identical on host and worker, because sandboxes
+      # are started through the host docker daemon.
+      - ${SLCLOUD_WORK:-/srv/slcloud/work}:${SLCLOUD_WORK:-/srv/slcloud/work}
+      # Only the worker mounts the docker socket. Sandbox containers never do.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  slcloud-data:

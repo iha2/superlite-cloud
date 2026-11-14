@@ -1,0 +1,94 @@
+"""Remote MCP tools for submitting and following tasks."""
+
+from __future__ import annotations
+
+import functools
+import json
+
+from slcloud import auth, learning
+from slcloud.errors import BadTransition, NotFound, Rejected
+
+try:  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP
+
+    def _new() -> FastMCP:
+        return FastMCP("slcloud", stateless_http=True, json_response=True)
+
+except ModuleNotFoundError:  # mcp 2.x renamed FastMCP to MCPServer
+    from mcp.server.mcpserver import MCPServer as FastMCP
+
+    def _new() -> FastMCP:
+        return FastMCP("slcloud")
+
+
+def tools(engine, store, settings, whoami) -> dict:
+    def guard(fn):
+        @functools.wraps(fn)
+        def run(*a, **kw):
+            try:
+                return fn(*a, **kw)
+            except NotFound:
+                return {"error": "not found"}
+            except (BadTransition, Rejected) as e:
+                return {"error": str(e)}
+
+        return run
+
+    def ws() -> str:
+        return whoami().workspace
+
+    @guard
+    def submit_task(repo: str, prompt: str, agent: str = "claude", base: str = "HEAD"):
+        """Queue a task: the agent plans first and waits for approval."""
+        t = engine.submit(ws(), repo, prompt, agent, base).public()
+        return {"task_id": t["id"], "status": t["status"]}
+
+    @guard
+    def get_task(task_id: str):
+        """Return one task."""
+        return engine.get(ws(), task_id).public()
+
+    @guard
+    def list_tasks():
+        """List this workspace's tasks, newest first."""
+        return [t.public() for t in engine.list(ws())]
+
+    @guard
+    def respond(task_id: str, answer: str):
+        """Answer a waiting task, for example approve."""
+        return engine.respond(ws(), task_id, answer).public()
+
+    @guard
+    def cancel_task(task_id: str):
+        """Cancel a task."""
+        return engine.cancel(ws(), task_id).public()
+
+    @guard
+    def fetch_command(task_id: str):
+        """Return the git command that fetches a finished task's branch."""
+        t = engine.get(ws(), task_id).public()
+        if t["status"] != "done":
+            return {"error": "task is not done"}
+        res = t.get("result") or {}
+        if isinstance(res, str):
+            res = json.loads(res)
+        fetch = res.get("fetch", "")
+        if res.get("bundle"):
+            url = f"{settings.public_url.rstrip('/')}/api/tasks/{task_id}/bundle"
+            return {"command": fetch.replace("<bundle-url>", url), "bundle_url": url}
+        return {"command": fetch}
+
+    @guard
+    def team_lessons():
+        """Approved lessons the team has agreed on."""
+        return learning.lessons(store, ws())
+
+    fns = (submit_task, get_task, list_tasks, respond, cancel_task, fetch_command, team_lessons)
+    return {f.__name__: f for f in fns}
+
+
+def build_mcp(engine, store, settings) -> FastMCP:
+    mcp = _new()
+    for fn in tools(engine, store, settings, auth.current_principal).values():
+        mcp.tool()(fn)
+    return mcp

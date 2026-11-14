@@ -3,3 +3,18 @@ __pycache__/
 *.pyc
 .venv/
 .env
+
+# superlite: dependency, build and cache folders
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+*.db
+work/

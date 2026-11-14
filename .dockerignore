@@ -1,0 +1,14 @@
+.git
+.venv
+.superlite
+.env
+.pytest_cache
+.mypy_cache
+.ruff_cache
+__pycache__
+*.pyc
+*.egg-info
+*.db
+work
+docs
+tests

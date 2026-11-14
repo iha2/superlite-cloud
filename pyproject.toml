@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "slcloud"
+version = "0.1.0"
+description = "superlite.cloud core server"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "mcp>=1.10,<2",
+  "cryptography",
+  "httpx",
+  "superlite @ git+https://github.com/iha2/superlite@superlite/outbox-package",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pyyaml",
+]
+
+[project.scripts]
+slcloud = "slcloud.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/slcloud"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: excluded from the fast run (-m 'not slow')"]
