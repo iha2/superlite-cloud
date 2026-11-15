@@ -9,14 +9,16 @@ from datetime import datetime, timezone
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from . import learning
+from . import learning, runs
 from .config import Settings
-from .errors import BadTransition, Forbidden, NotFound, Rejected
+from .errors import BadTransition, Forbidden, HandleTaken, NotFound, Rejected
 from .store import Store
+from .stream import make_router
 
 
 def create_app(settings: Settings, store: Store, engine, whoami) -> FastAPI:
     app = FastAPI(title="slcloud")
+    app.include_router(make_router(store, engine, whoami))
 
     def err(status: int, msg: str) -> JSONResponse:
         return JSONResponse({"error": msg}, status_code=status)
@@ -25,9 +27,17 @@ def create_app(settings: Settings, store: Store, engine, whoami) -> FastAPI:
     async def _nf(_: Request, e: NotFound):
         return err(404, "not found")
 
+    @app.exception_handler(runs.NoSuchMember)
+    async def _nm(_: Request, e: runs.NoSuchMember):
+        return err(404, "no such member")
+
     @app.exception_handler(BadTransition)
     async def _bt(_: Request, e: BadTransition):
         return err(409, str(e) or "bad transition")
+
+    @app.exception_handler(HandleTaken)
+    async def _ht(_: Request, e: HandleTaken):
+        return err(409, "handle taken")
 
     @app.exception_handler(Rejected)
     async def _rj(_: Request, e: Rejected):
@@ -47,6 +57,9 @@ def create_app(settings: Settings, store: Store, engine, whoami) -> FastAPI:
     def health():
         return {"ok": True}
 
+    def run_of(ref: str):
+        return runs.get_run(store, whoami(), ref)
+
     @app.post("/api/tasks")
     def submit(body: dict = Body(...)):
         p = whoami()
@@ -54,40 +67,65 @@ def create_app(settings: Settings, store: Store, engine, whoami) -> FastAPI:
             repo, prompt = body["repo"], body["prompt"]
         except KeyError as e:
             raise Rejected(f"missing field: {e.args[0]}") from None
-        t = engine.submit(p.workspace, repo, prompt, body.get("agent", "claude"), body.get("base", "HEAD"))
+        # the owner is always the caller; a body "owner" is ignored
+        t = engine.submit(p.workspace, repo, prompt, body.get("agent", "claude"), body.get("base", "HEAD"),
+                          owner=p.member, name=body.get("name"))
         return t.public()
 
     @app.get("/api/tasks")
-    def list_tasks():
-        return [t.public() for t in engine.list(whoami().workspace)]
+    def list_tasks(all: int = 0):
+        p = whoami()
+        if all:
+            admin()
+            out = [t.public() for t in engine.list(p.workspace)]
+        else:
+            out = [t.public() for t in engine.list(p.workspace, owner=p.member)]
+        runs.mark_seen(store, p.member)
+        return out
 
-    @app.get("/api/tasks/{task_id}")
-    def get_task(task_id: str):
-        return engine.get(whoami().workspace, task_id).public()
+    @app.get("/api/status")
+    def status():
+        return {"notices": runs.notices(store, whoami().member)}
 
-    @app.post("/api/tasks/{task_id}/respond")
-    def respond(task_id: str, body: dict = Body(...)):
+    @app.post("/api/runs/{ref:path}/give")
+    def give(ref: str, body: dict = Body(...)):
+        email = body.get("email")
+        if not email or not isinstance(email, str):
+            raise Rejected("missing field: email")
+        return runs.give(store, engine, whoami(), ref, email).public()
+
+    @app.get("/api/runs/{ref:path}/attach")
+    def attach(ref: str):
+        t = run_of(ref)
+        return {"run": t.name, "id": t.id, "status": t.status}
+
+    @app.post("/api/tasks/{ref:path}/respond")
+    def respond(ref: str, body: dict = Body(...)):
+        t = run_of(ref)
         if "answer" not in body:
             raise Rejected("missing field: answer")
-        return engine.respond(whoami().workspace, task_id, body["answer"]).public()
+        return engine.respond(whoami().workspace, t.id, body["answer"]).public()
 
-    @app.post("/api/tasks/{task_id}/cancel")
-    def cancel(task_id: str):
-        return engine.cancel(whoami().workspace, task_id).public()
+    @app.post("/api/tasks/{ref:path}/cancel")
+    def cancel(ref: str):
+        t = run_of(ref)
+        return engine.cancel(whoami().workspace, t.id).public()
 
-    @app.get("/api/tasks/{task_id}/events")
-    def events(task_id: str):
-        ws = whoami().workspace
-        engine.get(ws, task_id)
-        return engine.events(task_id)
+    @app.get("/api/tasks/{ref:path}/events")
+    def events(ref: str):
+        return engine.events(run_of(ref).id)
 
-    @app.get("/api/tasks/{task_id}/bundle")
-    def bundle(task_id: str):
-        engine.get(whoami().workspace, task_id)
-        path = os.path.join(settings.data_dir, "bundles", f"{task_id}.bundle")
+    @app.get("/api/tasks/{ref:path}/bundle")
+    def bundle(ref: str):
+        t = run_of(ref)
+        path = os.path.join(settings.data_dir, "bundles", f"{t.id}.bundle")
         if not os.path.isfile(path):
             raise NotFound("bundle")
         return FileResponse(path, media_type="application/octet-stream")
+
+    @app.get("/api/tasks/{ref:path}")
+    def get_task(ref: str):
+        return run_of(ref).public()
 
     @app.post("/api/learn/rows")
     def learn_rows(body: dict = Body(...)):

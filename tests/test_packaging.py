@@ -15,7 +15,7 @@ def test_compose_services():
     services = _compose()["services"]
     assert "server" in services
     assert "worker" in services
-    assert "8787:8787" in services["server"]["ports"]
+    assert "127.0.0.1:8787:8787" in services["server"]["ports"]
     assert any(str(v).split(":")[-1] == "/data" for v in services["server"]["volumes"])
     assert " ".join(services["worker"]["command"]) == "slcloud worker"
 

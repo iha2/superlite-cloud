@@ -1,242 +1,253 @@
+import json
 import os
+import stat
+import subprocess
+import sys
+import textwrap
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 
-from slcloud import worker
-from slcloud.gitops import HandBack
-from slcloud.sandbox import JobResult
+from slcloud import members, worker
+from slcloud.engine import Engine
+from slcloud.sandbox import ProcessRunner
+from slcloud.store import Store
+from slcloud.vault import Vault
 
-REAL = os.environ.get("SUPERLITE_REAL") == "1"
 KEY = "sk-ant-xyz1234"
-NOTICE = "Run `superlite-cli orchestrator set ai` first."
+GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@x"}
+
+FAKE_CLAUDE = textwrap.dedent('''\
+    #!{py}
+    import json, os, sys, time
+    with open("{log}", "a") as f:
+        f.write(json.dumps(sys.argv[1:]) + "\\n")
+
+    def say(o):
+        print(json.dumps(o), flush=True)
+
+    def user():
+        line = sys.stdin.readline()
+        return json.loads(line)["message"]["content"] if line else None
+
+    prompt = user()
+    sess = "s_abc"
+    say({{"type": "assistant", "session_id": sess, "message": {{"content": [
+        {{"type": "tool_use", "name": "Edit", "input": {{"file_path": "out.txt"}}}}]}}}})
+    open("out.txt", "a").write(prompt + "\\n")
+    text = "all done"
+    if prompt.startswith("slow"):
+        time.sleep(0.8)
+    if prompt.startswith("plan"):
+        text = "Plan ready. Reply approve to start"
+    if prompt.startswith("wait"):
+        say({{"type": "assistant", "session_id": sess, "message": {{"content": [
+            {{"type": "text", "text": "waiting for you"}}]}}}})
+        text = "got " + str(user())
+    say({{"type": "result", "session_id": sess, "result": text, "is_error": False}})
+''')
+
+FAKE_CLI = textwrap.dedent('''\
+    import subprocess, sys
+    a = sys.argv[1:]
+    def g(*x): subprocess.run(["git", *x], check=True)
+    assert a[0] == "session"
+    if a[1] == "create":
+        g("checkout", "-q", "-b", "superlite/sessions/" + a[a.index("--slug") + 1])
+    elif a[1] == "rename":
+        g("branch", "-m", "superlite/sessions/" + a[a.index("--slug") + 1],
+          "superlite/sessions/" + a[a.index("--to") + 1])
+''')
 
 
-def fake_mask(text, secrets):
-    for s in secrets:
-        text = text.replace(s, "***" + s[-4:])
-    return text
+def git(*args, cwd=None):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
+                   env={**os.environ, **GIT_ENV})
 
 
-class FakeEngine:
-    def __init__(self, task=None):
-        self.queue = [task] if task else []
-        self.calls = []
-        self.events = []
-
-    def claim(self):
-        return self.queue.pop(0) if self.queue else None
-
-    def transition(self, task_id, status, **fields):
-        self.calls.append((task_id, status, fields))
-        return SimpleNamespace(id=task_id, status=status, **fields)
-
-    def add_event(self, task_id, kind, data):
-        self.events.append((task_id, kind, data))
-
-
-class FakeVault:
-    def __init__(self, keys):
-        self.keys = keys
-
-    def get(self, ws, provider):
-        return self.keys.get(provider)
-
-
-class FakeRunner:
-    def __init__(self, result):
-        self.result = result
-        self.jobs = []
-
-    def run(self, job):
-        self.jobs.append(job)
-        return self.result
-
-
-def mk_task(**kw):
-    base = dict(id="t_0123456789ab", ws="w1", repo="/r.git", prompt="add x",
-                agent="claude", base="HEAD", session=None, answer=None, status="running")
-    base.update(kw)
-    return SimpleNamespace(**base)
-
-
-def ok_out(text="all done", session="s1"):
-    import json
-    return json.dumps({"type": "result", "result": text, "session_id": session, "is_error": False})
-
-
-@pytest.fixture(autouse=True)
-def _mask(monkeypatch):
-    if not REAL:
-        monkeypatch.setattr(worker, "mask", fake_mask)
-
-
-def mk_deps(tmp_path, task, result, keys=None):
-    eng = FakeEngine(task)
-    runner = FakeRunner(result)
-    clones, hbs = [], []
-
-    def clone(repo, base, dest):
-        clones.append((repo, base, dest))
-        return "abc"
-
-    def hand_back(workdir, branch, out_dir, push=True):
-        hbs.append((workdir, branch, out_dir, push))
-        return HandBack(branch=branch, sha="9c1e", pushed=True, bundle=None, fetch="git fetch origin x")
-
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    git("init", "-q", "--bare", "-b", "main", str(origin))
+    git("init", "-q", "-b", "main", str(seed))
+    (seed / "a.txt").write_text("a\n")
+    git("add", "-A", cwd=seed)
+    git("commit", "-q", "-m", "init", cwd=seed)
+    git("push", "-q", str(origin), "main", cwd=seed)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    claude = bindir / "claude"
+    claude.write_text(FAKE_CLAUDE.format(py=sys.executable, log=tmp_path / "claude.log"))
+    claude.chmod(claude.stat().st_mode | stat.S_IEXEC)
+    cli = tmp_path / "fakecli.py"
+    cli.write_text(FAKE_CLI)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    store = Store(str(tmp_path / "t.db"))
+    eng = Engine(store)
+    vault = Vault(store, "mk")
+    vault.set("w1", "anthropic", KEY)
     settings = SimpleNamespace(work_dir=str(tmp_path / "work"), data_dir=str(tmp_path / "data"),
                                worker_image="img:1")
-    vault = FakeVault({"anthropic": KEY, "gemini": "g-key-9999"} if keys is None else keys)
-    deps = worker.Deps(eng, vault, runner, settings, clone=clone, hand_back=hand_back)
-    return deps, eng, runner, clones, hbs
+    deps = worker.Deps(eng, vault, ProcessRunner(), settings, poll=0.1,
+                       cli=[sys.executable, str(cli)])
+    chris = members.create_member(store, "w1", "chris", "chris@example.com", "member")
+    return SimpleNamespace(eng=eng, deps=deps, origin=str(origin), tmp=tmp_path, chris=chris,
+                           store=store)
 
 
-def test_loop_once_empty(tmp_path):
-    deps, *_ = mk_deps(tmp_path, None, JobResult(0, "", "", False))
-    assert worker.loop_once(deps) is False
+def submit(env, prompt, name=None):
+    env.eng.submit("w1", env.origin, prompt, "claude", "main", owner=env.chris, name=name)
+    return env.eng.claim()
 
 
-def test_loop_once_runs(tmp_path):
-    deps, eng, *_ = mk_deps(tmp_path, mk_task(), JobResult(0, ok_out(), "", False))
-    assert worker.loop_once(deps) is True
-    assert eng.calls[-1][1] == "done"
+def branches(origin):
+    out = subprocess.run(["git", "-C", origin, "for-each-ref", "--format=%(refname:short)",
+                          "refs/heads"], capture_output=True, text=True).stdout
+    return set(out.split())
 
 
-def test_no_key_fails(tmp_path):
-    deps, eng, runner, clones, _ = mk_deps(tmp_path, mk_task(), JobResult(0, "", "", False), keys={})
-    worker.run_task(mk_task(), deps)
-    assert eng.calls == [("t_0123456789ab", "failed", {"error": "no anthropic key"})]
-    assert runner.jobs == [] and clones == []
+def texts(env, task_id):
+    return [(e["kind"], (e["data"] or {}).get("text")) for e in env.eng.events(task_id)]
 
 
-def test_plan_waits(tmp_path):
-    out = ok_out("Plan ready. Reply approve to start")
-    deps, eng, runner, clones, _ = mk_deps(tmp_path, None, JobResult(0, out, "", False))
-    worker.run_task(mk_task(), deps)
-    assert eng.calls == [("t_0123456789ab", "waiting",
-                          {"session": "s1", "plan": "Plan ready. Reply approve to start"})]
-    assert len(clones) == 1
-    job = runner.jobs[0]
-    assert job.env == {"ANTHROPIC_API_KEY": KEY}
-    assert job.workdir == str(tmp_path / "work" / "t_0123456789ab")
-    assert job.command[-1] == "add x"
+def test_done_hands_back(env):
+    t = submit(env, "Fix the login redirect")
+    r = worker.run_task(t, env.deps)
+    assert r.status == "done", r.error
+    assert r.result["pushed"] is True and r.result["branch"] == "superlite/sessions/login-fix"
+    assert "superlite/sessions/login-fix" in branches(env.origin)
+    assert ("handback", "handed back on superlite/sessions/login-fix") in texts(env, t.id)
+    assert any(e["kind"] == "tool" for e in env.eng.events(t.id))
+    assert not os.path.exists(os.path.join(env.deps.settings.work_dir, t.id))
 
 
-def test_resume_uses_answer(tmp_path):
-    deps, eng, runner, clones, _ = mk_deps(tmp_path, None, JobResult(0, ok_out(), "", False))
-    worker.run_task(mk_task(session="s1", answer="approve"), deps)
-    assert clones == []
-    assert runner.jobs[0].command[-1] == "approve"
-    assert runner.jobs[0].command[-3:-1] == ["--resume", "s1"]
+def test_waiting_keeps_checkout(env):
+    t = submit(env, "plan the thing")
+    r = worker.run_task(t, env.deps)
+    assert r.status == "waiting" and r.session == "s_abc"
+    run_dir = os.path.join(env.deps.settings.work_dir, t.id)
+    assert os.path.isfile(os.path.join(run_dir, "out.txt"))
+    env.eng.respond("w1", t.id, "approve")
+    t2 = env.eng.claim()
+    r2 = worker.run_task(t2, env.deps)
+    assert r2.status == "done", r2.error
+    calls = [json.loads(x) for x in open(env.tmp / "claude.log")]
+    assert "--resume" not in calls[0] and calls[1][calls[1].index("--resume") + 1] == "s_abc"
+    assert not os.path.exists(run_dir)
 
 
-def test_key_masked(tmp_path):
-    deps, eng, *_ = mk_deps(tmp_path, None, JobResult(1, "", f"boom {KEY} bad", False))
-    worker.run_task(mk_task(), deps)
-    _, status, f = eng.calls[-1]
-    assert status == "failed" and KEY not in f["error"] and "***1234" in f["error"]
+def test_two_runs_one_repo(env):
+    a = submit(env, "Fix the login redirect")
+    b = submit(env, "Dark mode for settings page")
+    out = []
+    ths = [threading.Thread(target=lambda t=t: out.append(worker.run_task(t, env.deps)))
+           for t in (a, b)]
+    [t.start() for t in ths]
+    [t.join(60) for t in ths]
+    assert sorted(r.status for r in out) == ["done", "done"], [r.error for r in out]
+    assert {"superlite/sessions/login-fix", "superlite/sessions/dark-mode"} <= branches(env.origin)
 
 
-def test_nonzero_exit_failed(tmp_path):
-    deps, eng, *_ = mk_deps(tmp_path, None, JobResult(2, "", "x" * 3000, False))
-    worker.run_task(mk_task(), deps)
-    _, status, f = eng.calls[-1]
-    assert status == "failed" and len(f["error"]) == 2000
+def test_nudge_delivered(env):
+    t = submit(env, "wait for it", name="nudge_me")
+    box = []
+    th = threading.Thread(target=lambda: box.append(worker.run_task(t, env.deps)))
+    th.start()
+    deadline = time.time() + 20
+    while time.time() < deadline and not any(e["kind"] == "tool" for e in env.eng.events(t.id)):
+        time.sleep(0.02)
+    nid = env.eng.add_nudge(t.id, env.chris, "use v2")
+    t0 = time.time()
+    while time.time() - t0 < 0.5 and env.eng.pending_nudges(t.id):
+        time.sleep(0.01)
+    assert not env.eng.pending_nudges(t.id) and time.time() - t0 < 0.5
+    th.join(30)
+    assert ("nudge", "nudge from chris") in texts(env, t.id)
+    row = env.store.query("SELECT status FROM nudges WHERE id=?", (nid,))[0]
+    assert row["status"] == "delivered"
+    assert box[0].status == "done", box[0].error
+    assert any(e["kind"] == "text" and e["data"]["text"] for e in env.eng.events(t.id))
 
 
-def test_timed_out_failed(tmp_path):
-    deps, eng, *_ = mk_deps(tmp_path, None, JobResult(-1, "", "", True))
-    worker.run_task(mk_task(), deps)
-    assert eng.calls[-1] == ("t_0123456789ab", "failed", {"error": "timed out"})
+def test_driver_fail_watch_only(env, monkeypatch):
+    real = worker.get_driver
+
+    def broken(agent, start, session=None):
+        d = real(agent, start, session)
+
+        def boom(text):
+            raise RuntimeError("no steer")
+
+        d.nudge = boom
+        return d
+
+    monkeypatch.setattr(worker, "get_driver", broken)
+    t = submit(env, "slow one", name="slow_one")
+    nid = env.eng.add_nudge(t.id, env.chris, "x")
+    r = worker.run_task(t, env.deps)
+    assert r.status == "done", r.error
+    assert ("notice", "nudges are off") in texts(env, t.id)
+    row = env.store.query("SELECT status FROM nudges WHERE id=?", (nid,))[0]
+    assert row["status"] == "unsupported"
 
 
-def test_no_resume_agent_ai_notice(tmp_path):
-    deps, eng, runner, *_ = mk_deps(tmp_path, None, JobResult(0, "plain text", "", False))
-    worker.run_task(mk_task(agent="gemini"), deps)
-    assert any(c.startswith(NOTICE) for c in runner.jobs[0].command)
-    assert runner.jobs[0].env == {"GEMINI_API_KEY": "g-key-9999"}
-    assert any(e[1] == "notice" for e in eng.events)
+def test_no_git_in_run_dir(env, monkeypatch):
+    real = subprocess.run
+    seen = []
+
+    def spy(argv, *a, **kw):
+        if argv and argv[0] == "git":
+            seen.append(kw.get("cwd"))
+        return real(argv, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    t = submit(env, "Fix the login redirect")
+    r = worker.run_task(t, env.deps)
+    assert r.status == "done", r.error
+    run_dir = os.path.join(env.deps.settings.work_dir, t.id)
+    assert seen and run_dir not in seen
 
 
-def test_done_result(tmp_path):
-    deps, eng, runner, clones, hbs = mk_deps(tmp_path, None, JobResult(0, ok_out(), "", False))
-    worker.run_task(mk_task(), deps)
-    assert hbs == [(str(tmp_path / "work" / "t_0123456789ab"), "slcloud/t_0123456789ab",
-                    str(tmp_path / "data" / "bundles"), True)]
-    assert eng.calls[-1] == ("t_0123456789ab", "done", {"result": {
-        "branch": "slcloud/t_0123456789ab", "sha": "9c1e", "pushed": True,
-        "bundle": None, "fetch": "git fetch origin x"}})
+def test_no_key_fails(env):
+    store = env.store
+    store.exec("DELETE FROM keys")
+    t = submit(env, "Fix the login redirect")
+    r = worker.run_task(t, env.deps)
+    assert r.status == "failed" and r.error == "no anthropic key"
 
 
-def test_bad_agent_and_vault_error_fail_masked(tmp_path):
-    deps, eng, *_ = mk_deps(tmp_path, None, JobResult(0, "", "", False))
-    worker.run_task(mk_task(agent="nope"), deps)
-    assert eng.calls[-1][1] == "failed" and "unknown agent" in eng.calls[-1][2]["error"]
-
-    def boom(ws, provider):
-        raise RuntimeError("vault down")
-    deps.vault.get = boom
-    worker.run_task(mk_task(), deps)
-    assert eng.calls[-1][1] == "failed" and "vault down" in eng.calls[-1][2]["error"]
+def test_turn_end_shapes():
+    assert worker._turn_end({"kind": "status", "status": "done"}) == "done"
+    assert worker._turn_end({"kind": "status", "status": "error"}) == "error"
+    assert worker._turn_end({"kind": "done"}) == "done"
+    assert worker._turn_end({"kind": "error", "text": "x"}) == "error"
+    assert worker._turn_end({"kind": "text"}) is None
 
 
-def test_clone_failure_masked(tmp_path):
-    deps, eng, runner, *_ = mk_deps(tmp_path, None, JobResult(0, "", "", False))
-
-    def bad_clone(repo, base, dest):
-        raise RuntimeError(f"fatal {KEY}")
-    deps.clone = bad_clone
-    worker.run_task(mk_task(), deps)
-    _, status, f = eng.calls[-1]
-    assert status == "failed" and KEY not in f["error"] and runner.jobs == []
+def test_loop_once(env):
+    assert worker.loop_once(env.deps) is False
+    env.eng.submit("w1", env.origin, "Fix the login redirect", "claude", "main", owner=env.chris)
+    assert worker.loop_once(env.deps) is True
 
 
-def test_plan_masked_and_env_only_key(tmp_path):
-    out = ok_out(f"plan {KEY} Reply approve to start")
-    deps, eng, runner, *_ = mk_deps(tmp_path, None, JobResult(0, out, "", False))
-    worker.run_task(mk_task(), deps)
-    assert KEY not in eng.calls[-1][2]["plan"]
-    assert "--bare" in runner.jobs[0].command
-    assert list(runner.jobs[0].env) == ["ANTHROPIC_API_KEY"]
+def test_bad_base_fails_before_git(env):
+    env.eng.submit("w1", env.origin, "Fix the login redirect", "claude", "--upload-pack=x", owner=env.chris)
+    t = env.eng.claim()
+    r = worker.run_task(t, env.deps)
+    assert r.status == "failed" and r.error == "invalid base"
 
 
-def test_loop_survives_transition_error(tmp_path):
-    deps, eng, *_ = mk_deps(tmp_path, mk_task(), JobResult(0, ok_out(), "", False))
-
-    def bad(*a, **k):
-        raise RuntimeError("cancelled")
-    eng.transition = bad
-    assert worker.loop_once(deps) is True
-
-
-def _mk_workdir(tmp_path, deps):
-    wd = tmp_path / "work" / "t_0123456789ab"
-
-    def clone(repo, base, dest):
-        os.makedirs(dest)
-        (wd / "f.txt").write_text("x")
-        return "abc"
-    deps.clone = clone
-    return wd
-
-
-def test_workdir_removed_when_done(tmp_path):
-    deps, *_ = mk_deps(tmp_path, None, JobResult(0, ok_out(), "", False))
-    wd = _mk_workdir(tmp_path, deps)
-    worker.run_task(mk_task(), deps)
-    assert not wd.exists()
-
-
-def test_workdir_removed_when_failed(tmp_path):
-    deps, *_ = mk_deps(tmp_path, None, JobResult(2, "", "boom", False))
-    wd = _mk_workdir(tmp_path, deps)
-    worker.run_task(mk_task(), deps)
-    assert not wd.exists()
-
-
-def test_workdir_kept_when_waiting(tmp_path):
-    out = ok_out("Plan ready. Reply approve to start")
-    deps, *_ = mk_deps(tmp_path, None, JobResult(0, out, "", False))
-    wd = _mk_workdir(tmp_path, deps)
-    worker.run_task(mk_task(), deps)
-    assert wd.exists()
+def test_commit_skips_secret_files(tmp_path):
+    repo = tmp_path / "r"
+    git("init", "-q", "-b", "main", str(repo))
+    (repo / "sub").mkdir()
+    for n in (".env", ".env.local", "sub/.env", "sub/id_rsa", "key.pem", ".npmrc", "ok.txt"):
+        (repo / n).write_text("x\n")
+    envv = {**os.environ, **worker._GIT_ENV, "SL_MSG": "m"}
+    subprocess.run(["sh", "-c", worker._COMMIT], cwd=repo, env=envv, check=True)
+    files = set(subprocess.run(["git", "ls-files"], cwd=repo, capture_output=True, text=True).stdout.split())
+    assert files == {"ok.txt"}

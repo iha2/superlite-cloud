@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import json
 
-from slcloud import auth, learning
+from slcloud import auth, learning, runs
 from slcloud.errors import BadTransition, NotFound, Rejected
 
 try:  # mcp 1.x
@@ -29,6 +29,8 @@ def tools(engine, store, settings, whoami) -> dict:
                 return fn(*a, **kw)
             except NotFound:
                 return {"error": "not found"}
+            except runs.NoSuchMember:
+                return {"error": "no such member"}
             except (BadTransition, Rejected) as e:
                 return {"error": str(e)}
 
@@ -40,33 +42,35 @@ def tools(engine, store, settings, whoami) -> dict:
     @guard
     def submit_task(repo: str, prompt: str, agent: str = "claude", base: str = "HEAD"):
         """Queue a task: the agent plans first and waits for approval."""
-        t = engine.submit(ws(), repo, prompt, agent, base).public()
+        t = engine.submit(ws(), repo, prompt, agent, base, owner=whoami().member).public()
         return {"task_id": t["id"], "status": t["status"]}
 
     @guard
     def get_task(task_id: str):
         """Return one task."""
-        return engine.get(ws(), task_id).public()
+        return runs.get_run(store, whoami(), task_id).public()
 
     @guard
     def list_tasks():
-        """List this workspace's tasks, newest first."""
-        return [t.public() for t in engine.list(ws())]
+        """List your runs, newest first."""
+        return list_runs()
 
     @guard
     def respond(task_id: str, answer: str):
         """Answer a waiting task, for example approve."""
-        return engine.respond(ws(), task_id, answer).public()
+        t = runs.get_run(store, whoami(), task_id)
+        return engine.respond(ws(), t.id, answer).public()
 
     @guard
     def cancel_task(task_id: str):
         """Cancel a task."""
-        return engine.cancel(ws(), task_id).public()
+        t = runs.get_run(store, whoami(), task_id)
+        return engine.cancel(ws(), t.id).public()
 
     @guard
     def fetch_command(task_id: str):
         """Return the git command that fetches a finished task's branch."""
-        t = engine.get(ws(), task_id).public()
+        t = runs.get_run(store, whoami(), task_id).public()
         if t["status"] != "done":
             return {"error": "task is not done"}
         res = t.get("result") or {}
@@ -79,11 +83,30 @@ def tools(engine, store, settings, whoami) -> dict:
         return {"command": fetch}
 
     @guard
+    def list_runs():
+        """List your runs, newest first."""
+        p = whoami()
+        out = [t.public() for t in engine.list(p.workspace, owner=p.member)]
+        runs.mark_seen(store, p.member)
+        return out
+
+    @guard
+    def give_run(run: str, email: str):
+        """Hand a run to another member, by their email address."""
+        return runs.give(store, engine, whoami(), run, email).public()
+
+    @guard
+    def status():
+        """Notices for you, such as runs given to you."""
+        return {"notices": runs.notices(store, whoami().member)}
+
+    @guard
     def team_lessons():
         """Approved lessons the team has agreed on."""
         return learning.lessons(store, ws())
 
-    fns = (submit_task, get_task, list_tasks, respond, cancel_task, fetch_command, team_lessons)
+    fns = (submit_task, get_task, list_tasks, respond, cancel_task, fetch_command, team_lessons,
+           list_runs, give_run, status)
     return {f.__name__: f for f in fns}
 
 

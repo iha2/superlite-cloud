@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
+from typing import Callable
 
 from slcloud.errors import Rejected
 
@@ -83,3 +84,52 @@ def hand_back(workdir: str, branch: str, out_dir: str, push: bool = True) -> Han
     if r.returncode != 0:
         raise Rejected("bundle failed")
     return HandBack(branch, sha, False, path, f"git fetch <bundle-url> {branch}")
+
+
+_PREFIX = "superlite/sessions/"
+
+
+def _taken(cache) -> set[str]:
+    return {b[len(_PREFIX):].replace("-", "_")
+            for b in cache.fetch() if b.startswith(_PREFIX)}
+
+
+def safe_hand_back(cache, run_dir: str, name: str, task_id: str, own: set[str],
+                   rename: Callable[[str, str], None], commit: Callable[[], None],
+                   log: Callable[[str], None], bundle_dir: str) -> HandBack:
+    """Hand a run back through the shared repo cache without clobbering others."""
+    from slcloud.names import free_name, slug
+
+    ref = f"refs/runs/{task_id}"
+
+    def clash(cur: str) -> str:
+        taken = _taken(cache)
+        if cur in taken and cur not in own:
+            new = free_name(cur, taken)
+            rename(cur, new)
+            log(f"renamed {cur} to {new}: branch taken on origin")
+            return new
+        return cur
+
+    try:
+        with cache.lock():
+            name = clash(name)
+            commit()
+            branch = _PREFIX + slug(name)
+            sha = cache.fetch_from(run_dir, branch, into=ref)
+            ok = cache.push(ref, branch)
+            if not ok:
+                new = clash(name)
+                if new != name:
+                    name = new
+                    branch = _PREFIX + slug(name)
+                    sha = cache.fetch_from(run_dir, branch, into=ref)
+                ok = cache.push(ref, branch)
+            if ok:
+                return HandBack(branch, sha, True, None, f"git fetch origin {branch}")
+            os.makedirs(bundle_dir, exist_ok=True)
+            out = os.path.join(bundle_dir, f"{slug(name)}.bundle")
+            path = cache.bundle(ref, out)
+            return HandBack(branch, sha, False, path, f"git fetch {path} {branch}")
+    finally:
+        cache.drop_ref(ref)

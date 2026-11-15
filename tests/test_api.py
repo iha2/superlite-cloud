@@ -19,40 +19,78 @@ class FakeTask:
     workspace = "w1"
 
     def __init__(self, **kw):
-        self.d = {**PUB, **kw}
+        self.d = {**PUB, "name": "login_fix", "owner": "m1", **kw}
+
+    def __getattr__(self, k):
+        try:
+            return self.d[k]
+        except KeyError:
+            raise AttributeError(k) from None
 
     def public(self):
         return self.d
 
 
 class FakeEngine:
-    def submit(self, ws, repo, prompt, agent, base):
-        return FakeTask(repo=repo, prompt=prompt, agent=agent, base=base)
+    def __init__(self):
+        self.submitted = []
+        self.listed = []
 
-    def get(self, ws, tid):
-        if ws != "w1" or tid != PUB["id"]:
-            raise NotFound(tid)
-        return FakeTask()
+    def submit(self, ws, repo, prompt, agent, base, *, owner, name=None):
+        self.submitted.append({"owner": owner, "name": name})
+        return FakeTask(repo=repo, prompt=prompt, agent=agent, base=base, owner=owner)
 
-    def list(self, ws):
+    def list(self, ws, owner=None):
+        self.listed.append(owner)
         return [FakeTask()]
 
     def respond(self, ws, tid, answer):
-        self.get(ws, tid)
         raise BadTransition("not waiting")
 
     def cancel(self, ws, tid):
         return FakeTask(status="cancelled")
 
-    def events(self, tid):
-        return [{"kind": "status", "data": {"to": "queued"}, "at": "t"}]
+    def events(self, tid, after=0):
+        return [{"id": 1, "kind": "status", "data": {"to": "queued"}, "at": "t"}]
 
 
-def client(role="admin", store=None):
+class FakeRuns:
+    """Stands in for slcloud.runs (T10): only the owner or an admin sees a run."""
+
+    def __init__(self):
+        self.seen = []
+        self.noted = [{"id": 1, "task": "t_1", "text": "given by chris to pat (pat@example.com)", "seen": 0}]
+
+    def get_run(self, store, who, ref):
+        if ref not in ("login_fix", "chris/login_fix", PUB["id"]) or (who.role != "admin" and who.member != "m1"):
+            raise NotFound(ref)
+        return FakeTask()
+
+    def give(self, store, engine, who, ref, email):
+        self.get_run(store, who, ref)
+        return FakeTask(owner="m_1a2b3c4d", name="login_fix_2")
+
+    def notices(self, store, member):
+        return [] if member in self.seen else self.noted
+
+    def mark_seen(self, store, member):
+        self.seen.append(member)
+
+
+@pytest.fixture(autouse=True)
+def fake_runs(monkeypatch):
+    from slcloud import runs
+    f = FakeRuns()
+    for n in ("get_run", "give", "notices", "mark_seen"):
+        monkeypatch.setattr(runs, n, getattr(f, n), raising=False)
+    return f
+
+
+def client(role="admin", store=None, member="m1", engine=None):
     store = store or Store(":memory:")
     s = Settings("/d", "/d/x.db", "/d/work", "k")
-    who = lambda: SimpleNamespace(workspace="w1", role=role, member="m1")
-    return TestClient(create_app(s, store, FakeEngine(), who)), store
+    who = lambda: SimpleNamespace(workspace="w1", role=role, member=member)
+    return TestClient(create_app(s, store, engine or FakeEngine(), who)), store
 
 
 def test_health_and_task_routes():
@@ -60,8 +98,9 @@ def test_health_and_task_routes():
     assert c.get("/api/health").json() == {"ok": True}
     r = c.post("/api/tasks", json={"repo": "r", "prompt": "p"})
     assert r.status_code == 200 and r.json()["status"] == "queued"
-    assert c.get("/api/tasks").json() == [PUB]
-    assert c.get(f"/api/tasks/{PUB['id']}").json() == PUB
+    assert c.get("/api/tasks").json()[0]["id"] == PUB["id"]
+    assert c.get(f"/api/tasks/{PUB['id']}").json()["id"] == PUB["id"]
+    assert c.get("/api/tasks/chris/login_fix").json()["name"] == "login_fix"
     assert c.post(f"/api/tasks/{PUB['id']}/cancel").json()["status"] == "cancelled"
     assert c.get(f"/api/tasks/{PUB['id']}/events").json()[0]["kind"] == "status"
     assert c.get(f"/api/tasks/{PUB['id']}/bundle").status_code == 404
@@ -76,6 +115,70 @@ def test_not_found_404():
 def test_bad_transition_409():
     c, _ = client()
     assert c.post(f"/api/tasks/{PUB['id']}/respond", json={"answer": "approve"}).status_code == 409
+
+
+def test_every_route_non_owner_404():
+    c, _ = client("member", member="m_other")
+    gone = {"error": "not found"}
+    calls = [
+        c.get("/api/tasks/login_fix"),
+        c.get("/api/tasks/login_fix/events"),
+        c.post("/api/tasks/login_fix/respond", json={"answer": "approve"}),
+        c.post("/api/tasks/login_fix/cancel"),
+        c.get("/api/tasks/login_fix/bundle"),
+        c.post("/api/runs/login_fix/give", json={"email": "pat@example.com"}),
+        c.get("/api/runs/login_fix/attach"),
+        c.get("/api/runs/login_fix/events"),
+        c.post("/api/runs/login_fix/nudge", json={"text": "x"}),
+    ]
+    for r in calls:
+        assert r.status_code == 404 and r.json() == gone
+    eng = FakeEngine()
+    c, _ = client("member", member="m_other", engine=eng)
+    assert c.get("/api/tasks").status_code == 200 and eng.listed == ["m_other"]
+
+
+def test_give_by_email():
+    c, _ = client("member")
+    r = c.post("/api/runs/login_fix/give", json={"email": "PAT@example.com"})
+    assert r.json()["owner"] == "m_1a2b3c4d" and r.json()["name"] == "login_fix_2"
+    assert c.post("/api/runs/login_fix/give", json={}).status_code == 400
+
+
+def test_give_unknown_member_404(monkeypatch):
+    from slcloud import runs
+    owners = []
+
+    def give(store, engine, who, ref, email):
+        raise runs.NoSuchMember("no such member")
+
+    monkeypatch.setattr(runs, "give", give, raising=False)
+    c, _ = client("member")
+    r = c.post("/api/runs/login_fix/give", json={"email": "nobody@example.com"})
+    assert r.status_code == 404 and r.json() == {"error": "no such member"}
+    assert c.get("/api/tasks/login_fix").json()["owner"] == "m1" and not owners
+
+
+def test_body_owner_ignored():
+    eng = FakeEngine()
+    c, _ = client("member", engine=eng)
+    r = c.post("/api/tasks", json={"repo": "r", "prompt": "p", "owner": "m_other"})
+    assert r.json()["owner"] == "m1" and eng.submitted[0]["owner"] == "m1"
+
+
+def test_all_admin_only():
+    c, _ = client("member")
+    assert c.get("/api/tasks?all=1").status_code == 403
+    eng = FakeEngine()
+    c, _ = client("admin", engine=eng)
+    assert c.get("/api/tasks?all=1").status_code == 200 and eng.listed == [None]
+
+
+def test_status_marks(fake_runs):
+    c, _ = client("member")
+    assert c.get("/api/status").json()["notices"][0]["task"] == "t_1"
+    c.get("/api/tasks")
+    assert c.get("/api/status").json() == {"notices": []}
 
 
 def test_member_cannot_approve():

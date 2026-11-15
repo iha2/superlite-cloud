@@ -8,6 +8,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from . import names
 from .adapters import get_adapter
 from .errors import BadTransition, NotFound
 from .store import Store
@@ -20,8 +21,8 @@ ALLOWED = {
     "failed": set(),
     "cancelled": set(),
 }
-FIELDS = {"session", "plan", "answer", "result", "error"}
-PUBLIC = ("id", "repo", "prompt", "agent", "base", "status", "plan", "result", "error", "created", "updated")
+FIELDS = {"session", "plan", "answer", "result", "error", "dir"}
+PUBLIC = ("id", "name", "owner", "repo", "prompt", "agent", "base", "status", "plan", "result", "error", "created", "updated")
 
 
 def _now() -> str:
@@ -44,13 +45,16 @@ class Task:
     error: str | None = None
     created: str = ""
     updated: str = ""
+    name: str = ""
+    owner: str = ""
+    dir: str | None = None
 
     @classmethod
     def from_row(cls, r: dict) -> "Task":
         res = r["result"]
         return cls(r["id"], r["workspace"], r["repo"], r["prompt"], r["agent"], r["base"], r["status"],
                    r["session"], r["plan"], r["answer"], json.loads(res) if res else None,
-                   r["error"], r["created"], r["updated"])
+                   r["error"], r["created"], r["updated"], r["name"], r["owner"], r.get("dir"))
 
     def public(self) -> dict:
         return {k: getattr(self, k) for k in PUBLIC}
@@ -78,17 +82,46 @@ class Engine:
             raise NotFound(f"task {task_id}")
         return Task.from_row(rows[0])
 
-    def submit(self, ws: str, repo: str, prompt: str, agent: str, base: str) -> Task:
+    def submit(self, ws: str, repo: str, prompt: str, agent: str, base: str, *,
+               owner: str, name: str | None = None) -> Task:
         get_adapter(agent)  # raises ValueError for an unknown agent
+        name = names.check_name(name) if name is not None else names.make_name(prompt)
         tid = "t_" + secrets.token_hex(6)
         now = _now()
-        self.store.exec(
-            "INSERT INTO tasks(id,workspace,repo,prompt,agent,base,status,created,updated) VALUES(?,?,?,?,?,?,?,?,?)",
-            (tid, ws, repo, prompt, agent, base, "queued", now, now))
-        self._event(tid, "queued")
+        with self.store._lock:
+            live = self.store.query(
+                "SELECT name FROM tasks WHERE workspace=? AND repo=? AND status NOT IN ('done','failed','cancelled')",
+                (ws, repo))
+            name = names.free_name(name, {r["name"] for r in live})
+            self.store.exec(
+                "INSERT INTO tasks(id,workspace,repo,prompt,agent,base,status,created,updated,owner,name)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (tid, ws, repo, prompt, agent, base, "queued", now, now, owner, name))
+            self._event(tid, "queued")
         task = self._load(tid)
         self._fire(task)
         return task
+
+    def rename(self, task_id: str, name: str) -> Task:
+        names.check_name(name)
+        self._load(task_id)
+        self.store.exec("UPDATE tasks SET name=?, updated=? WHERE id=?", (name, _now(), task_id))
+        return self._load(task_id)
+
+    def add_nudge(self, task_id: str, sender: str, text: str) -> int:
+        self._load(task_id)
+        with self.store._lock:
+            self.store.exec("INSERT INTO nudges(task,sender,text,status,at) VALUES(?,?,?,'queued',?)",
+                            (task_id, sender, text, _now()))
+            return self.store.query("SELECT last_insert_rowid() AS i")[0]["i"]
+
+    def pending_nudges(self, task_id: str) -> list[dict]:
+        rows = self.store.query(
+            "SELECT id,sender,text,at FROM nudges WHERE task=? AND status='queued' ORDER BY id", (task_id,))
+        return rows
+
+    def mark_nudge(self, nudge_id: int, status: str) -> None:
+        self.store.exec("UPDATE nudges SET status=?, delivered_at=? WHERE id=?", (status, _now(), nudge_id))
 
     def get(self, ws: str, task_id: str) -> Task:
         task = self._load(task_id)
@@ -96,8 +129,11 @@ class Engine:
             raise NotFound(f"task {task_id}")
         return task
 
-    def list(self, ws: str) -> list[Task]:
-        rows = self.store.query("SELECT * FROM tasks WHERE workspace=? ORDER BY created DESC, rowid DESC", (ws,))
+    def list(self, ws: str, owner: str | None = None) -> list[Task]:
+        sql, args = "SELECT * FROM tasks WHERE workspace=?", [ws]
+        if owner is not None:
+            sql, args = sql + " AND owner=?", [ws, owner]
+        rows = self.store.query(sql + " ORDER BY created DESC, rowid DESC", tuple(args))
         return [Task.from_row(r) for r in rows]
 
     def claim(self) -> Task | None:
@@ -151,7 +187,8 @@ class Engine:
         self.store.exec("INSERT INTO events(task,kind,data,at) VALUES(?,?,?,?)",
                         (task_id, kind, json.dumps(data), _now()))
 
-    def events(self, task_id: str) -> list[dict]:
-        rows = self.store.query("SELECT kind,data,at FROM events WHERE task=? ORDER BY id", (task_id,))
-        return [{"kind": r["kind"], "data": json.loads(r["data"]) if r["data"] else None, "at": r["at"]}
-                for r in rows]
+    def events(self, task_id: str, after: int = 0) -> list[dict]:
+        rows = self.store.query(
+            "SELECT id,kind,data,at FROM events WHERE task=? AND id>? ORDER BY id", (task_id, after))
+        return [{"id": r["id"], "kind": r["kind"], "data": json.loads(r["data"]) if r["data"] else None,
+                 "at": r["at"]} for r in rows]

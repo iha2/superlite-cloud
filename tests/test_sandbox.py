@@ -28,7 +28,8 @@ def test_process_env_minimal():
     assert names <= {"PATH", "HOME", "FOO", "PWD", "SHLVL", "_", "OLDPWD"}
 
 
-def test_argv_shape():
+def test_argv_shape(monkeypatch):
+    monkeypatch.delenv("SLCLOUD_DOCKER_BIN", raising=False)
     argv = DockerRunner().argv(job())
     assert argv[:17] == ["docker", "run", "--rm", "--cpus", "2.0", "--memory", "4g",
                          "--pids-limit", "512", "--cap-drop", "ALL", "--security-opt",
@@ -79,7 +80,8 @@ def test_get_runner():
         get_runner("vm")
 
 
-def test_timeout_removes_container():
+def test_timeout_removes_container(monkeypatch):
+    monkeypatch.delenv("SLCLOUD_DOCKER_BIN", raising=False)
     calls = []
 
     def fake(argv, **kw):
@@ -141,3 +143,97 @@ def test_docker_bin_from_env(monkeypatch):
     DockerRunner(run=fake).run(job(timeout_s=1))
     assert calls[0][0][0] == "podman" and calls[1][0][:3] == ["podman", "rm", "-f"]
     assert DockerRunner(docker_bin="nerdctl").argv(job())[0] == "nerdctl"
+
+
+def test_docker_runner_uses_env_bin_when_no_arg(monkeypatch):
+    monkeypatch.setenv("SLCLOUD_DOCKER_BIN", "/opt/bin/podman")
+    r = DockerRunner()
+    assert r.docker_bin == "/opt/bin/podman"
+    assert r.argv(job())[0] == "/opt/bin/podman"
+
+
+# --- long-lived start() ---
+import subprocess as _sp
+import sys
+
+from slcloud.sandbox import Mount
+
+
+def _fake_popen(cmd=None, calls=None):
+    def popen(argv, **kw):
+        if calls is not None:
+            calls.append((argv, kw))
+        real = cmd or [sys.executable, "-c", "import sys;[print(l.upper(),end='') for l in sys.stdin]"]
+        return _sp.Popen(real, **kw)
+    return popen
+
+
+def test_start_stdin_open():
+    calls = []
+    p = DockerRunner(popen=_fake_popen(calls=calls)).start(job())
+    p.write("hi\n")
+    p.close_stdin()
+    assert list(p.lines()) == ["HI"]
+    p.wait()
+    argv, kw = calls[0]
+    assert argv[argv.index("run") + 1] == "-i"
+    assert kw["stdin"] == _sp.PIPE
+
+
+def test_timeout_kills():
+    calls, rm = [], []
+
+    def run(argv, **kw):
+        rm.append(argv)
+        return _sp.CompletedProcess(argv, 0, "", "")
+
+    d = DockerRunner(run=run, popen=_fake_popen([ "sleep", "5"], calls))
+    r = d.start(job(timeout_s=1)).wait()
+    assert r.timed_out is True
+    assert rm and rm[0][1:3] == ["rm", "-f"] and rm[0][3] == calls[0][0][4]
+
+
+def test_mount_validation():
+    for bad in (Mount("/a:b", "/c"), Mount("/a", "/c,d"), Mount("/a", "/c:ro")):
+        with pytest.raises(ValueError):
+            DockerRunner().argv(job(mounts=[bad]))
+
+
+def test_mount_argv():
+    a = DockerRunner().argv(job(mounts=[Mount("/d/x.git", "/d/x.git"), Mount("/h", "/p", False)]))
+    i = a.index("/d/x.git:/d/x.git:ro")
+    assert a[i - 1] == "-v" and a[a.index("/h:/p") - 1] == "-v"
+
+
+def test_env_not_in_argv():
+    calls = []
+    p = DockerRunner(popen=_fake_popen(calls=calls)).start(job())
+    p.close_stdin()
+    p.wait()
+    argv, kw = calls[0]
+    assert "sekret" not in " ".join(argv)
+    assert kw["env"]["ANTHROPIC_API_KEY"] == "sekret"
+
+
+def test_process_start_roundtrip():
+    p = ProcessRunner().start(Job("x", [sys.executable, "-c",
+                              "import sys;[print(l.upper(),end='') for l in sys.stdin]"], {}, "/tmp"))
+    p.write("hi\n")
+    p.close_stdin()
+    assert list(p.lines()) == ["HI"]
+    assert p.wait().code == 0
+
+
+def test_kill_removes_container():
+    """Regression: Proc.kill() only killed the local docker client, leaving the container."""
+    calls, rm = [], []
+
+    def run(argv, **kw):
+        rm.append(argv)
+        return _sp.CompletedProcess(argv, 0, "", "")
+
+    d = DockerRunner(run=run, popen=_fake_popen(["sleep", "5"], calls))
+    p = d.start(job(timeout_s=100))
+    p.kill()
+    p.wait()
+    assert rm and rm[0][1:3] == ["rm", "-f"] and rm[0][3] == calls[0][0][4]

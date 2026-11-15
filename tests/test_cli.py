@@ -172,3 +172,82 @@ def test_unknown_command():
     code, _, _ = run(["bogus"])
     assert code == 2
     assert run([])[0] == 2
+
+
+
+# ---- admin commands (app, members, accounts, auth faked) ----
+
+CHRIS = {"id": "m_c", "workspace": "w_ab12", "handle": "chris", "email": "chris@example.com", "role": "admin", "locked": 0}
+PAT = {"id": "m_p", "workspace": "w_ab12", "handle": "pat", "email": None, "role": "member", "locked": 0}
+
+
+def admin(argv, tmp_path, monkeypatch, have=(CHRIS, PAT), server_running=lambda: False):
+    from slcloud import accounts, app, auth, members
+    from slcloud.store import Store
+
+    state = {"members": {m["handle"]: dict(m) for m in have}, "tokens": []}
+
+    def create_member(store, ws, handle, email, role):
+        state["members"][handle] = {"id": "m_" + handle, "workspace": ws, "handle": handle, "email": email,
+                                    "role": role, "locked": 0}
+        return "m_" + handle
+
+    def fake(mod, name, fn):
+        monkeypatch.setattr(mod, name, fn, raising=False)
+
+    fake(app, "init_workspace", lambda s, name, member="admin": ("slc_tok", "INV1"))
+    fake(members, "create_member", create_member)
+    fake(members, "member_by_handle", lambda st, ws, h: state["members"].get(h))
+    fake(members, "list_members", lambda st, ws: list(state["members"].values()))
+    fake(members, "set_email", lambda st, mid, e: state.setdefault("email", (mid, e)))
+    fake(accounts, "create_invite", lambda st, mid, now: "INV2")
+    fake(auth, "create_token",
+         lambda st, ws, role, member, name="": state["tokens"].append((ws, role, member)) or "slc_new")
+    Store(str(tmp_path / "slcloud.db")).exec("INSERT OR IGNORE INTO workspaces(id,name,created) VALUES('w_ab12','acme','t')")
+    out, err = io.StringIO(), io.StringIO()
+    env = {"SLCLOUD_DATA": str(tmp_path), "SLCLOUD_MASTER_KEY": "k", "HOME": str(tmp_path)}
+    code = cli.main(argv, env=env, out=out, err=err, server_running=server_running)
+    return code, out.getvalue(), err.getvalue(), state
+
+
+def test_init_prints_token_and_invite(tmp_path, monkeypatch):
+    code, out, _, _ = admin(["init", "--member", "chris"], tmp_path, monkeypatch)
+    assert code == 0 and out == "token: slc_tok\ninvite: INV1\n"
+
+
+def test_member_list(tmp_path, monkeypatch):
+    code, out, _, _ = admin(["member", "list"], tmp_path, monkeypatch)
+    assert code == 0 and out == "chris  chris@example.com  admin\npat  -  member\n"
+
+
+def test_token_existing_same_role(tmp_path, monkeypatch):
+    code, out, _, st = admin(["token", "create", "w_ab12", "admin", "--member", "chris"], tmp_path, monkeypatch)
+    assert code == 0 and out == "slc_new\n" and st["tokens"] == [("w_ab12", "admin", "m_c")]
+
+
+def test_token_existing_other_role(tmp_path, monkeypatch):
+    code, out, err, st = admin(["token", "create", "acme", "admin", "--member", "pat"], tmp_path, monkeypatch)
+    assert code == 2 and "pat is member, not admin" in err and out == "" and st["tokens"] == []
+
+
+def test_token_new_needs_email(tmp_path, monkeypatch):
+    code, out, err, st = admin(["token", "create", "w_ab12", "member", "--member", "sam"], tmp_path, monkeypatch)
+    assert code == 2 and out == "" and "--email" in err and st["tokens"] == []
+    code, out, _, st = admin(["token", "create", "w_ab12", "member", "--member", "sam", "--email", "sam@example.com"],
+                             tmp_path, monkeypatch)
+    assert code == 0 and st["members"]["sam"]["email"] == "sam@example.com"
+
+
+def test_invite(tmp_path, monkeypatch):
+    code, out, _, st = admin(["invite", "pat", "--email", "pat@example.com"], tmp_path, monkeypatch)
+    assert code == 0 and out == "invite: INV2\n" and st["email"] == ("m_p", "pat@example.com")
+    code, _, err, _ = admin(["invite", "nobody"], tmp_path, monkeypatch)
+    assert code == 2
+
+
+def test_backup_restore_cli(tmp_path, monkeypatch):
+    f = str(tmp_path / "b.bak")
+    assert admin(["backup", f], tmp_path, monkeypatch)[0] == 0
+    code, _, err, _ = admin(["restore", f], tmp_path, monkeypatch, server_running=lambda: True)
+    assert code == 2 and "refused" in err
+    assert admin(["restore", f], tmp_path, monkeypatch)[0] == 0

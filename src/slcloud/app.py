@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -13,10 +15,11 @@ import time
 
 from fastapi import FastAPI
 
-from . import auth, setup
+from . import accounts, auth, members, setup, tokens_page, webauth
 from .api import create_app
 from .config import Settings
 from .engine import Engine
+from .errors import HandleTaken
 from .mcp_server import build_mcp
 from .sandbox import get_runner
 from .store import Store
@@ -36,7 +39,29 @@ def _parts(settings: Settings, runner=None):
     return store, vault, engine, deps
 
 
-def build(settings: Settings, runner=None) -> FastAPI:
+WEB_EXACT = frozenset({"/signin", "/register", "/signout", "/setup", "/members", "/invites"})
+WEB_TREES = ("/tokens", "/members")  # the path itself or anything below it; "/tokensX" is not one of these
+log = logging.getLogger("slcloud")
+
+
+class _Front:
+    """Sends cookie-session pages to the web app and everything else to the bearer-guarded app."""
+
+    def __init__(self, api: FastAPI, web: FastAPI):
+        self.api, self.web = api, web
+
+    def __getattr__(self, name):
+        return getattr(self.api, name)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope["path"]
+            if path in WEB_EXACT or any(path == t or path.startswith(t + "/") for t in WEB_TREES):
+                return await self.web(scope, receive, send)
+        await self.api(scope, receive, send)
+
+
+def build(settings: Settings, runner=None) -> _Front:
     store, vault, engine, deps = _parts(settings, runner)
     app = create_app(settings, store, engine, auth.current_principal)
     app.include_router(setup.make_router(vault, settings, auth.current_principal))
@@ -51,20 +76,38 @@ def build(settings: Settings, runner=None) -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
+        log.warning("master key is not in backups: store SLCLOUD_MASTER_KEY somewhere safe")
         async with mcp.session_manager.run():
             yield
 
     app.router.lifespan_context = lifespan
     app.add_middleware(auth.BearerMiddleware, store=store)
     app.state.store, app.state.engine, app.state.worker_deps = store, engine, deps
-    return app
+
+    who = webauth.session_principal(store, settings)
+    web = FastAPI(title="slcloud web")
+    web.include_router(webauth.make_router(store, settings))
+    web.include_router(tokens_page.make_router(store, settings, who))
+    web.include_router(setup.page_router(who))
+    return _Front(app, web)
 
 
-def init_workspace(settings: Settings, name: str) -> tuple[str, str]:
+def init_workspace(settings: Settings, name: str, member: str | None = None) -> tuple[str, str]:
+    """Create a workspace with its admin member. Returns (token, invite code).
+
+    Handles are unique across all workspaces: with no `member` the handle is derived from the
+    workspace name ("<name>-admin"); a handle already in use raises HandleTaken.
+    """
     os.makedirs(settings.data_dir, exist_ok=True)
     store = Store(settings.db_path)
+    if member is None:
+        member = (re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or "ws") + "-admin"
+    if members.handle_taken(store, member):
+        raise HandleTaken(member)
     ws = auth.create_workspace(store, name)
-    return ws, auth.create_token(store, ws, "admin")
+    mid = members.create_member(store, ws, member, None, "admin")
+    token = auth.create_token(store, ws, "admin", mid, "setup")
+    return token, accounts.create_invite(store, mid, time.time())
 
 
 def run_worker(settings: Settings, runner=None, poll: float = 2.0, stop=lambda: False) -> None:
@@ -81,7 +124,7 @@ def run_worker(settings: Settings, runner=None, poll: float = 2.0, stop=lambda: 
 class _ProbeServer:
     """HTTPServer-like wrapper (serve_forever, server_address, shutdown, server_close) over uvicorn."""
 
-    def __init__(self, app: FastAPI, tmp: str, port: int = 0):
+    def __init__(self, app, tmp: str, port: int = 0):
         import uvicorn
 
         self._tmp = tmp
@@ -123,7 +166,9 @@ def probe_server(port: int = 0) -> _ProbeServer:
         master_key=secrets.token_urlsafe(32), sandbox="process")
     app = build(settings)
     store = app.state.store
-    token = auth.create_token(store, auth.create_workspace(store, "probe"), "admin")
+    ws = auth.create_workspace(store, "probe")
+    mid = members.create_member(store, ws, "probe", None, "admin")
+    token = auth.create_token(store, ws, "admin", mid, "probe")
     return _ProbeServer(_ProbeAuth(app, token), tmp, port)
 
 

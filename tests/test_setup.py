@@ -126,3 +126,57 @@ def test_superlite_version_from_metadata(monkeypatch):
 
     monkeypatch.setattr(setup.metadata, "version", missing)
     assert setup._superlite_version() == "unknown"
+
+
+def _built(tmp_path):
+    from slcloud import app as slapp
+    s = Settings(data_dir=str(tmp_path / "d"), db_path=str(tmp_path / "d" / "x.db"),
+                 work_dir=str(tmp_path / "w"), master_key="k", sandbox="process")
+    return s, slapp
+
+
+def test_init_workspace_admin(tmp_path):
+    from slcloud import accounts
+    from slcloud.store import Store
+    s, slapp = _built(tmp_path)
+    token, invite = slapp.init_workspace(s, "acme", member="chris")
+    assert token.startswith("slc_")
+    store = Store(s.db_path)
+    rows = store.query("SELECT id, handle, role FROM members")
+    assert [(r["handle"], r["role"]) for r in rows] == [("chris", "admin")]
+    assert store.query("SELECT member FROM tokens")[0]["member"] == rows[0]["id"]
+    import time
+    assert accounts.invite_info(store, invite, time.time())["handle"] == "chris"
+    _, inv2 = slapp.init_workspace(s, "other")
+    assert Store(s.db_path).query("SELECT handle FROM members WHERE handle='other-admin'")
+
+
+def test_setup_behind_signin(tmp_path):
+    s, slapp = _built(tmp_path)
+    c = TestClient(slapp.build(s), follow_redirects=False)
+    r = c.get("/setup")
+    assert r.status_code == 303 and r.headers["location"] == "/signin"
+    assert c.get("/signin").status_code == 200
+    assert c.get("/api/tasks").status_code == 401
+
+
+def test_setup_with_session(tmp_path):
+    from slcloud import accounts
+    s, slapp = _built(tmp_path)
+    app = slapp.build(s)
+    _, invite = slapp.init_workspace(s, "acme", member="chris")
+    store = app.state.store
+    import time
+    accounts.redeem(store, invite, "correct horse battery", time.time())
+    sid = accounts.sign_in(store, "chris", "correct horse battery", time.time())
+    c = TestClient(app, follow_redirects=False)
+    c.cookies.set("sid", sid)
+    assert "<html" in c.get("/setup").text
+
+
+def test_master_key_notice(tmp_path, caplog):
+    s, slapp = _built(tmp_path)
+    with caplog.at_level("WARNING", logger="slcloud"):
+        with TestClient(slapp.build(s)):
+            pass
+    assert "master key is not in backups" in caplog.text

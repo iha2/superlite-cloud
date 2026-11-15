@@ -152,3 +152,18 @@ def test_connect_prints_token_only_on_stdout(tmp_path):
     code, out, err = run(["connect", "claude"], tmp_path)
     assert code == 0 and TOK in out and err == ""
     assert TOK not in _files_text(tmp_path)
+
+
+def test_backup_file_not_world_readable_and_no_keys_printed(tmp_path):
+    import io
+    import os
+    import stat
+
+    from slcloud.store import Store
+
+    Store(str(tmp_path / "slcloud.db"))
+    out, err = io.StringIO(), io.StringIO()
+    env = {"SLCLOUD_DATA": str(tmp_path), "SLCLOUD_MASTER_KEY": "mk-secret-1"}
+    code = cli.main(["backup", str(tmp_path / "b.bak")], env=env, out=out, err=err)
+    assert code == 0 and "mk-secret-1" not in out.getvalue() + err.getvalue()
+    assert stat.S_IMODE(os.stat(tmp_path / "b.bak").st_mode) == 0o600

@@ -7,7 +7,7 @@ from importlib import metadata
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from . import connect, keytest
 from .vault import mask
@@ -28,6 +28,19 @@ def _superlite_version() -> str:
         return metadata.version("superlite")
     except metadata.PackageNotFoundError:
         return "unknown"
+
+
+def page_router(session) -> APIRouter:
+    """The /setup page, shown only to a signed-in member (session(request) -> principal or None)."""
+    r = APIRouter()
+
+    @r.get("/setup", response_class=HTMLResponse)
+    def page(request: Request):
+        if session(request) is None:
+            return RedirectResponse("/signin", status_code=303)
+        return HTMLResponse(_HTML.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
+
+    return r
 
 
 def make_router(vault, settings, whoami, run=subprocess.run, test_key=keytest.test_key) -> APIRouter:
