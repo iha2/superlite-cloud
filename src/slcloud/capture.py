@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 from slcloud.adapters import redact
@@ -17,6 +18,9 @@ def rel(path):
         return path[len(SANDBOX_ROOT):]
     return path
 _KINDS = {"text", "tool", "file", "status"}
+# A trailing key that may still grow, or a trailing start of a key marker.
+_OPEN_KEY = re.compile(r"\b(?:sk-|key-|AIza|ghp_)[A-Za-z0-9_\-]*\Z")
+_OPEN_MARK = re.compile(r"\b(?:s|sk|k|ke|key|A|AI|AIz|g|gh|ghp)\Z")
 
 
 class Capture:
@@ -26,7 +30,22 @@ class Capture:
         self.secrets, self.clock, self.min_gap = list(secrets), clock, min_gap
         self.step = 0
         self._pending: str | None = None
+        self._carry = ""  # raw tail that may be the start of a secret split across chunks
         self._since = 0.0
+
+    def _held(self, data: str) -> int:
+        """Length of the tail of data that could still grow into a secret."""
+        n = 0
+        for rx in (_OPEN_KEY, _OPEN_MARK):
+            m = rx.search(data)
+            if m:
+                n = max(n, len(m.group(0)))
+        for sec in self.secrets:
+            for k in range(min(len(sec) - 1, len(data)), n, -1):
+                if data.endswith(sec[:k]):
+                    n = k
+                    break
+        return n
 
     def _clean(self, value, limit: int | None = None):
         if not isinstance(value, str):
@@ -39,16 +58,22 @@ class Capture:
         self.add_event(self.task_id, kind, {"step": self.step, **data})
 
     def _emit_text(self) -> None:
-        if self._pending is not None:
-            text, self._pending = self._pending, None
-            self._emit("text", {"text": text})
+        if self._pending is not None or self._carry:
+            text = (self._pending or "") + self._clean(self._carry)
+            self._pending, self._carry = None, ""
+            self._emit("text", {"text": text[:MAX_TEXT]})
 
     def feed(self, event: dict) -> None:
         kind = event.get("kind")
         if kind not in _KINDS:
             return
         if kind == "text":
-            text = self._clean(str(event.get("text", "")), MAX_TEXT)
+            data = self._carry + str(event.get("text", ""))
+            cut = len(data) - self._held(data)
+            self._carry = data[cut:]
+            if cut == 0 and self._carry:
+                return  # the whole chunk may be part of a secret; wait for the next one
+            text = self._clean(data[:cut])
             if self._pending is None:
                 self._since = self.clock()
             self._pending = text

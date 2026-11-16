@@ -15,7 +15,7 @@ from slcloud import gitops, names, repocache
 from slcloud.adapters import PLAN_MARKER, get_adapter, redact
 from slcloud.capture import Capture
 from slcloud.drivers import get_driver
-from slcloud.sandbox import Job, Mount
+from slcloud.sandbox import Job, Mount, remove_state
 from slcloud.vault import mask
 
 PLAN_MARK = PLAN_MARKER
@@ -70,6 +70,7 @@ def run_task(task, deps: Deps):
     finally:
         if not keep:
             shutil.rmtree(run_dir, ignore_errors=True)
+            remove_state(run_dir)
 
 
 def _turn_end(ev: dict) -> str | None:
@@ -194,6 +195,7 @@ def _run_task(task, deps: Deps, run_dir: str):
         else:
             prompt, session = task.prompt, None
             shutil.rmtree(run_dir, ignore_errors=True)
+            remove_state(run_dir)
             os.makedirs(os.path.dirname(run_dir), exist_ok=True)
             with cache.lock():
                 cache.fetch()

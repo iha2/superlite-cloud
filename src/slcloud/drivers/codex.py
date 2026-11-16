@@ -166,5 +166,11 @@ class CodexDriver(RpcDriver):
             self._add_text(item.get("text", ""))
             return [{"kind": "text", "text": item.get("text", "")}]
         elif method == "turn/completed":
+            turn = p.get("turn") or {}
+            if turn.get("status") in ("failed", "interrupted"):
+                self._ok = False  # partial work from a failed turn must not be committed
+                err = turn.get("error") or {}
+                msg = err.get("message") if isinstance(err, dict) else err
+                return [{"kind": "error", "text": str(msg or f"turn {turn['status']}")}]
             return [{"kind": "done"}]
         return []

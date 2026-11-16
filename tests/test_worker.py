@@ -127,6 +127,16 @@ def test_done_hands_back(env):
     assert not os.path.exists(os.path.join(env.deps.settings.work_dir, t.id))
 
 
+def test_agent_state_removed_with_run_dir(env):
+    from slcloud.sandbox import state_root
+    t = submit(env, "Fix the login redirect")
+    run_dir = os.path.join(env.deps.settings.work_dir, t.id)
+    os.makedirs(os.path.join(state_root(run_dir), "claude"))
+    r = worker.run_task(t, env.deps)
+    assert r.status == "done", r.error
+    assert not os.path.exists(state_root(run_dir))
+
+
 def test_waiting_keeps_checkout(env):
     t = submit(env, "plan the thing")
     r = worker.run_task(t, env.deps)

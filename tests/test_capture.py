@@ -69,3 +69,33 @@ def test_strips_sandbox_prefix():
     c.feed({"kind": "tool", "tool": "Edit", "target": "/work/api2.py"})
     c.feed({"kind": "file", "path": "/work/src/a.py"})
     assert ev[0][2]["target"] == "api2.py" and ev[1][2]["path"] == "src/a.py"
+
+
+def _stream(chunks, secrets=()):
+    c, ev, now = make(secrets)
+    for ch in chunks:
+        now[0] += 1.0  # every chunk is past the throttle gap, so each one emits on its own
+        c.feed({"kind": "text", "text": ch})
+    c.flush()
+    return " ".join(e[2]["text"] for e in ev)
+
+
+def test_provider_key_split_across_chunks_is_redacted():
+    out = _stream(["using sk-abcdefgh", "ijklmnop1234 now"])
+    assert "sk-" not in out and "abcdefgh" not in out and "ijklmnop" not in out
+    assert "now" in out
+
+
+def test_key_split_inside_marker_and_flushed_tail():
+    assert "sk" not in _stream(["token s", "k-abcdefghijklmnop1234"]).replace("task", "")
+    out = _stream(["see key-abcdefghijklmnop", "12345"])
+    assert "12345" not in out and "abcdefgh" not in out
+
+
+def test_configured_secret_split_across_chunks_is_masked():
+    out = _stream(["key zzsecret", "value123 here"], ["zzsecretvalue123"])
+    assert "zzsecret" not in out and "value123" not in out and "here" in out
+
+
+def test_plain_text_split_across_chunks_still_flows():
+    assert "world" in _stream(["hello ", "world"])

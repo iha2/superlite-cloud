@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import stat
 import subprocess
 import threading
 import uuid
@@ -221,16 +223,40 @@ _STATE_DIRS = {"claude": "/root/.claude", "codex": "/root/.codex", "gemini": "/r
                "cursor": "/root/.cursor", "cursor-config": "/root/.config/cursor"}
 
 
+def state_root(workdir: str) -> str:
+    """Worker-controlled home of a run's agent state: beside the checkout, never inside it,
+    because the agent can write anywhere in the checkout (including by planting symlinks)."""
+    workdir = os.path.abspath(workdir)
+    return os.path.join(os.path.dirname(workdir), ".slcloud-agent", os.path.basename(workdir))
+
+
+def _safe_dir(path: str) -> None:
+    """Create path if missing; refuse anything already there that is not a real directory."""
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        pass
+    if not stat.S_ISDIR(os.lstat(path).st_mode):  # lstat: a symlink is not a directory here
+        raise ValueError(f"unsafe agent state path: {path}")
+
+
+def remove_state(workdir: str) -> None:
+    """Drop a run's agent state; call wherever the run directory is removed."""
+    shutil.rmtree(state_root(workdir), ignore_errors=True)
+
+
 def state_mounts(workdir: str) -> list[Mount]:
-    """Per-run agent state, kept under the checkout's .git so it is never committed and
-    is removed with the run directory. Empty when the workdir is not a git checkout."""
-    root = os.path.join(workdir, ".git", "slcloud-agent")
+    """Per-run agent state, kept outside the checkout so it is never committed and cannot be
+    redirected by the agent. Empty when the workdir is not a git checkout."""
     if not os.path.isdir(os.path.join(workdir, ".git")):
         return []
+    root = state_root(workdir)
+    _safe_dir(os.path.dirname(root))
+    _safe_dir(root)
     out = []
     for name, target in _STATE_DIRS.items():
         host = os.path.join(root, name)
-        os.makedirs(host, exist_ok=True)
+        _safe_dir(host)
         out.append(Mount(host, target, False))
     return out
 

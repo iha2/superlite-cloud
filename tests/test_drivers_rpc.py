@@ -106,6 +106,24 @@ def test_codex_events_and_result():
     d.stop()
 
 
+def test_codex_failed_or_interrupted_turn_is_an_error():
+    for status in ("failed", "interrupted"):
+        d, fp = mk(CodexDriver, codex_reply())
+        d.start("x")
+        d.events(json.dumps({"method": "item/completed", "params": {
+            "item": {"type": "agentMessage", "text": "partial"}}}))
+        ev = d.events(json.dumps({"method": "turn/completed", "params": {
+            "turn": {"status": status, "error": {"message": "boom"}}}}))
+        assert [e["kind"] for e in ev] == ["error"]
+        assert not d.result().ok
+        d.stop()
+    d, fp = mk(CodexDriver, codex_reply())
+    d.start("x")
+    assert d.events(json.dumps({"method": "turn/completed", "params": {
+        "turn": {"status": "completed"}}})) == [{"kind": "done"}]
+    d.stop()
+
+
 def gem_reply(m):
     r = {"jsonrpc": "2.0", "id": m.get("id")}
     if m["method"] == "session/new":
