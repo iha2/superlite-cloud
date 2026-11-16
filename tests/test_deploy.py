@@ -46,9 +46,12 @@ def test_cursor_pin():
     assert "cursor.com/install" not in text
 
 
-def test_superlite_branch():
+def test_superlite_pinned_to_release_tag():
+    # The worker image and the Python dependency name the same superlite tag.
     lines = _worker_lines()
-    assert "ARG SUPERLITE_VERSION=superlite/sessions/cloud-live-runs" in lines
+    assert "ARG SUPERLITE_VERSION=v4.2.0" in lines
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    assert "superlite @ git+https://github.com/iha2/superlite@v4.2.0" in pyproject
 
 
 @pytest.mark.slow

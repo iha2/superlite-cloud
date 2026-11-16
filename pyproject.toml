@@ -13,7 +13,7 @@ dependencies = [
   "mcp>=1.10,<2",
   "cryptography",
   "httpx",
-  "superlite @ git+https://github.com/iha2/superlite@superlite/outbox-package",
+  "superlite @ git+https://github.com/iha2/superlite@v4.2.0",
 ]
 
 [project.optional-dependencies]
