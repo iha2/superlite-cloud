@@ -259,3 +259,49 @@ def test_backup_restore_cli(tmp_path, monkeypatch):
     code, _, err, _ = admin(["restore", f], tmp_path, monkeypatch, server_running=lambda: True)
     assert code == 2 and "refused" in err
     assert admin(["restore", f], tmp_path, monkeypatch)[0] == 0
+
+
+def test_init_invalid_member_is_clean_error(tmp_path, monkeypatch):
+    from slcloud import app
+
+    def bad(s, name, member=None):
+        raise ValueError("handle must be a-z, 0-9 and -")
+
+    monkeypatch.setattr(app, "init_workspace", bad)
+    out, err = io.StringIO(), io.StringIO()
+    env = {"SLCLOUD_MASTER_KEY": "k", "SLCLOUD_DATA": str(tmp_path)}
+    code = cli.main(["init", "--member", "Chris"], env=env, out=out, err=err)
+    assert code == 2 and out.getvalue() == ""
+    assert "invalid member" in err.getvalue() and "Traceback" not in err.getvalue()
+
+
+@pytest.mark.parametrize("cmd", ["serve", "worker"])
+def test_server_and_worker_hold_shared_lock(tmp_path, monkeypatch, cmd):
+    from slcloud import app, backup
+
+    import sqlite3
+
+    sqlite3.connect(str(tmp_path / "x.bak")).close()  # a valid (empty) backup: only the lock can refuse
+    seen = {}
+
+    def run(*a, **k):
+        seen["refused"] = False
+        db = str(tmp_path / "slcloud.db")
+        try:
+            backup.restore(db, str(tmp_path / "x.bak"), lambda: False)
+        except backup.Refused as e:
+            seen["refused"] = "stop the server and worker" in str(e)  # the lock, not a bad file
+
+    import uvicorn
+    monkeypatch.setattr(app, "run_worker", run)
+    monkeypatch.setattr(app, "build", lambda s: object())
+    monkeypatch.setattr(uvicorn, "run", run)
+    env = {"SLCLOUD_MASTER_KEY": "k", "SLCLOUD_DATA": str(tmp_path)}
+    held_before = len(cli._HELD)
+    try:
+        assert cli._server([cmd], env, io.StringIO()) == 0
+        assert seen["refused"] is True
+        assert len(cli._HELD) == held_before + 1  # kept alive after the call returns
+    finally:
+        while len(cli._HELD) > held_before:
+            cli._HELD.pop().close()

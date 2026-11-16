@@ -186,6 +186,9 @@ def _admin(argv: list[str], env, out, err, server_running) -> int:
         except HandleTaken:
             err.write("handle taken\n")
             return 2
+        except ValueError as e:
+            err.write(f"invalid member: {e}\n")
+            return 2
         out.write(f"token: {token}\ninvite: {invite}\n")
         return 0
     if cmd == "token":
@@ -269,11 +272,20 @@ def _usage(err) -> int:
     return 2
 
 
+_HELD: list = []  # shared maintenance locks: kept open for the life of the process
+
+
 def _server(cmd: list[str], env, out) -> int:
-    from slcloud import app
+    from slcloud import app, backup
     from slcloud.config import load_settings
 
     settings = load_settings(dict(env))
+    os.makedirs(settings.data_dir, exist_ok=True)
+    try:
+        _HELD.append(backup.hold_shared(settings.db_path))  # restore refuses while this runs
+    except backup.Refused as e:
+        sys.stderr.write(f"refused: {e}\n")
+        return 2
     if cmd[0] == "serve":
         import uvicorn
 
