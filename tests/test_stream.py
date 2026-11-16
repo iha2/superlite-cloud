@@ -182,3 +182,28 @@ def test_nudge_ended_run_409(monkeypatch):
         r = c.post("/api/runs/login_fix/nudge", json={"text": "x"})
         assert r.status_code == 409 and r.json() == {"error": "login_fix has ended"}
         assert eng.nudges == []
+
+
+def test_alive_and_finished_pinned_to_task_id(monkeypatch):
+    refs = []
+
+    def get_run(store, who, ref):
+        refs.append(ref)
+        return SimpleNamespace(id="t_1", name="login_fix", status="running")
+
+    captured = {}
+
+    def fake_sse(engine, task_id, after, alive, sleep, **k):
+        captured["alive"], captured["finished"] = alive, k["finished"]
+        return iter(())
+
+    monkeypatch.setattr(stream, "_get_run", get_run)
+    monkeypatch.setattr(stream, "sse_lines", fake_sse)
+    app = FastAPI()
+    who = SimpleNamespace(workspace="w", role="member", member="m_9f2c1a7e")
+    app.include_router(stream.make_router(Store(":memory:"), FakeEngine(), lambda: who))
+    assert TestClient(app).get("/api/runs/login_fix/events").status_code == 200
+    refs.clear()
+    assert captured["alive"]() is True
+    captured["finished"]()
+    assert refs == ["t_1", "t_1"]  # not the mutable name

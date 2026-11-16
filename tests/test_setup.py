@@ -180,3 +180,30 @@ def test_master_key_notice(tmp_path, caplog):
         with TestClient(slapp.build(s)):
             pass
     assert "master key is not in backups" in caplog.text
+
+
+def test_init_workspace_bad_handle_writes_nothing(tmp_path):
+    from slcloud.store import Store
+    s, slapp = _built(tmp_path)
+    with pytest.raises(ValueError):
+        slapp.init_workspace(s, "acme", member="Chris")
+    st = Store(s.db_path)
+    assert st.query("SELECT id FROM workspaces") == [] and st.query("SELECT id FROM members") == []
+    slapp.init_workspace(s, "acme", member="chris")
+    assert len(Store(s.db_path).query("SELECT id FROM workspaces")) == 1
+
+
+def test_init_workspace_later_failure_rolls_back(tmp_path, monkeypatch):
+    from slcloud import accounts
+    from slcloud.store import Store
+    s, slapp = _built(tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(accounts, "create_invite", boom)
+    with pytest.raises(RuntimeError):
+        slapp.init_workspace(s, "acme", member="chris")
+    st = Store(s.db_path)
+    for t in ("workspaces", "members", "tokens", "invites"):
+        assert st.query(f"SELECT 1 FROM {t}") == []

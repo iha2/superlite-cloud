@@ -34,9 +34,17 @@ def slug(name: str) -> str:
 
 
 def free_name(base: str, taken: set[str]) -> str:
+    """`base` if free, else a numbered variant that check_name still accepts (at most 3 words)."""
     if base not in taken:
         return base
-    n = 2
-    while f"{base}_{n}" in taken:
+    words = base.split("_")
+    if len(words) >= 2 and words[-1].isdigit():  # already suffixed: bump the number
+        stem, n = "_".join(words[:-1]), int(words[-1]) + 1
+        join = "_"
+    elif len(words) < 3:
+        stem, n, join = base, 2, "_"
+    else:  # three words: no room for a fourth, so number the last word
+        stem, n, join = base, 2, ""
+    while f"{stem}{join}{n}" in taken:
         n += 1
-    return f"{base}_{n}"
+    return f"{stem}{join}{n}"

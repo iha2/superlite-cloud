@@ -24,6 +24,10 @@ def _handle(h: str) -> str:
     return h
 
 
+def check_handle(h: str) -> str:
+    return _handle(h)
+
+
 def _email(e: str) -> str:
     e = (e or "").strip().lower()
     if not _EMAIL.fullmatch(e):
@@ -111,4 +115,5 @@ def lock(store: Store, member_id: str) -> None:
     with store._lock:
         store.exec("DELETE FROM tokens WHERE member=?", (member_id,))
         store.exec("DELETE FROM web_sessions WHERE member=?", (member_id,))
+        store.exec("DELETE FROM invites WHERE member=?", (member_id,))  # else /register would unlock them
         store.exec("UPDATE members SET password=NULL, locked=1 WHERE id=?", (member_id,))

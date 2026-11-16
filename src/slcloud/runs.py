@@ -40,7 +40,7 @@ def get_run(store: Store, who: Principal, ref: str) -> Task:
     if isinstance(ref, str) and ref.startswith("t_"):
         rows = store.query("SELECT * FROM tasks WHERE id=? AND workspace=?", (ref, who.workspace))
         row = rows[0] if rows else None
-    elif isinstance(ref, str) and ref:
+    if row is None and isinstance(ref, str) and ref:  # "t_fix" with no such id is just a name
         if "/" in ref:
             handle, _, name = ref.partition("/")
             m = members.member_by_handle(store, who.workspace, handle)

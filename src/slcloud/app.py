@@ -102,12 +102,22 @@ def init_workspace(settings: Settings, name: str, member: str | None = None) -> 
     store = Store(settings.db_path)
     if member is None:
         member = (re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or "ws") + "-admin"
+    members.check_handle(member)  # before any write
     if members.handle_taken(store, member):
         raise HandleTaken(member)
-    ws = auth.create_workspace(store, name)
-    mid = members.create_member(store, ws, member, None, "admin")
-    token = auth.create_token(store, ws, "admin", mid, "setup")
-    return token, accounts.create_invite(store, mid, time.time())
+    ws = None
+    try:
+        ws = auth.create_workspace(store, name)
+        mid = members.create_member(store, ws, member, None, "admin")
+        token = auth.create_token(store, ws, "admin", mid, "setup")
+        return token, accounts.create_invite(store, mid, time.time())
+    except BaseException:
+        if ws is not None:  # leave no half-made workspace behind
+            with store._lock:
+                for table in ("invites", "tokens", "members"):
+                    store.exec(f"DELETE FROM {table} WHERE workspace=?", (ws,))
+                store.exec("DELETE FROM workspaces WHERE id=?", (ws,))
+        raise
 
 
 def run_worker(settings: Settings, runner=None, poll: float = 2.0, stop=lambda: False) -> None:

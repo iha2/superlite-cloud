@@ -68,8 +68,11 @@ def create_app(settings: Settings, store: Store, engine, whoami) -> FastAPI:
         except KeyError as e:
             raise Rejected(f"missing field: {e.args[0]}") from None
         # the owner is always the caller; a body "owner" is ignored
-        t = engine.submit(p.workspace, repo, prompt, body.get("agent", "claude"), body.get("base", "HEAD"),
-                          owner=p.member, name=body.get("name"))
+        try:
+            t = engine.submit(p.workspace, repo, prompt, body.get("agent", "claude"), body.get("base", "HEAD"),
+                              owner=p.member, name=body.get("name"))
+        except ValueError as e:  # bad name or unknown agent: the client's mistake, not a 500
+            raise Rejected(str(e)) from None
         return t.public()
 
     @app.get("/api/tasks")

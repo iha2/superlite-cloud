@@ -291,3 +291,13 @@ def test_attach_marks_that_run_seen():
     r = c.get("/api/runs/login_fix/attach")
     assert r.json() == {"run": "login_fix", "id": PUB["id"], "status": "queued"}
     assert [x["seen"] for x in st.query("SELECT seen FROM notices ORDER BY id")] == [1, 0]
+
+
+def test_submit_value_error_is_400():
+    class Bad(FakeEngine):
+        def submit(self, *a, **k):
+            raise ValueError("name must be 1-3 words of a-z0-9 joined by _")
+
+    c, _ = client(engine=Bad())
+    r = c.post("/api/tasks", json={"repo": "r", "prompt": "p", "name": "Login Fix"})
+    assert r.status_code == 400 and "name must be" in r.json()["error"]

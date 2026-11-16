@@ -95,13 +95,18 @@ def sign_in(store: Store, handle: str, password: str, now: float) -> str | None:
     m = rows[0] if rows else None
     usable = bool(m and not m["locked"] and m["password"])
     ok = verify(password, m["password"] if usable else DUMMY_HASH)
+    with store._lock:  # the slow scrypt above ran unlocked; the lockout read-modify-write is atomic
+        return _finish_sign_in(store, handle, m, ok and usable, now)
+
+
+def _finish_sign_in(store: Store, handle: str, m: dict | None, good: bool, now: float) -> str | None:
     miss = store.query("SELECT count, until FROM sign_in_misses WHERE handle=?", (handle,))
     count, until = (miss[0]["count"], miss[0]["until"]) if miss else (0, 0.0)
     if until > now:
         return None  # waiting: even the right password gets nothing
     if count >= MAX_MISSES:
         count = 0  # wait is over, start a fresh count
-    if not (ok and usable):
+    if not good:
         count += 1
         store.exec(
             "INSERT INTO sign_in_misses(handle, count, until) VALUES(?,?,?) "

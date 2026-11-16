@@ -75,6 +75,7 @@ def make_router(store, engine, whoami: Callable) -> APIRouter:
         except NotFound:
             return nf()
         _seen(store, who, task)
+        ref = task.id  # pin: a later rename or give must not retarget the access and alive checks
         hdr = request.headers.get("last-event-id", "")
         if hdr.isdigit():
             after = int(hdr)

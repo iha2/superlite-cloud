@@ -149,3 +149,19 @@ def test_check_public_url():
     assert c("http://example.com", "example.com") == "refused: plain http"
     assert c("https://cloud.example.com", "cloud.example.com") is None
     assert c("https://cloud.example.com", "10.0.0.1") == "Open https://cloud.example.com instead"
+
+
+def test_concurrent_wrong_passwords_count_every_miss(store, monkeypatch):
+    import threading
+    signed_up(store)
+    monkeypatch.setattr(accounts, "verify", lambda pw, stored: pw == PW)  # fast; the race is in the count
+    results = []
+
+    def go():
+        results.append(accounts.sign_in(store, "pat", "wrong password!", T0))
+
+    ts = [threading.Thread(target=go) for _ in range(accounts.MAX_MISSES)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert results == [None] * accounts.MAX_MISSES
+    assert accounts.sign_in(store, "pat", PW, T0 + 1) is None  # locked out: every miss was counted

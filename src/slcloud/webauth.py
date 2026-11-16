@@ -1,8 +1,11 @@
 """Web sign-in, register and sign-out pages, and the session principal."""
 from __future__ import annotations
 
+import asyncio
+import functools
 import html
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from urllib.parse import parse_qs
 
@@ -18,6 +21,7 @@ COOKIE = "sid"
 MAX_AGE = 12 * 3600
 BAD_LOGIN = "Wrong handle or password."
 _HEADERS = {"Cache-Control": "no-store", "X-Frame-Options": "DENY"}
+HASH_WORKERS = 4  # scrypt is slow and memory-hungry: run it off the event loop, a few at a time
 
 
 def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
@@ -70,6 +74,10 @@ def _go(path: str) -> RedirectResponse:
 
 def make_router(store: Store, settings: Settings, accounts=_accounts) -> APIRouter:
     router = APIRouter()
+    pool = ThreadPoolExecutor(max_workers=HASH_WORKERS, thread_name_prefix="slcloud-scrypt")
+
+    async def offload(fn, *args):
+        return await asyncio.get_running_loop().run_in_executor(pool, functools.partial(fn, *args))
 
     def forbidden(request: Request) -> HTMLResponse | None:
         if accounts.origin_ok(request.headers.get("origin"), settings.public_url):
@@ -85,7 +93,7 @@ def make_router(store: Store, settings: Settings, accounts=_accounts) -> APIRout
         if (bad := forbidden(request)) is not None:
             return bad
         f = await _form(request)
-        sid = accounts.sign_in(store, f.get("handle", ""), f.get("password", ""), time.time())
+        sid = await offload(accounts.sign_in, store, f.get("handle", ""), f.get("password", ""), time.time())
         if sid is None:
             return _signin_page(BAD_LOGIN, 401)
         resp = _go("/tokens")
@@ -109,12 +117,12 @@ def make_router(store: Store, settings: Settings, accounts=_accounts) -> APIRout
         if not info:
             return _page("Invite not valid", _msg("This invite is invalid, used or expired."), 404)
         try:
-            accounts.redeem(store, code, f.get("password", ""), now)
+            await offload(accounts.redeem, store, code, f.get("password", ""), now)
         except ValueError:
             if len(f.get("password", "")) < 12:
                 return _register_page(code, info, "Password must be at least 12 characters.", 400)
             return _page("Invite not valid", _msg("This invite is invalid, used or expired."), 404)
-        sid = accounts.sign_in(store, info["handle"], f.get("password", ""), now)
+        sid = await offload(accounts.sign_in, store, info["handle"], f.get("password", ""), now)
         if sid is None:
             return _go("/signin")
         resp = _go("/tokens")

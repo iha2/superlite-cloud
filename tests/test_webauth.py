@@ -140,3 +140,23 @@ def test_signout_clears(env):
     sc = r.headers["set-cookie"]
     assert "sid=" in sc and ("Max-Age=0" in sc or "expires" in sc.lower())
     assert c.post("/signout").status_code == 403
+
+
+def test_scrypt_work_runs_off_the_event_loop(env):
+    import threading
+
+    class Slow(FakeAccounts):
+        def sign_in(self, store, handle, password, now):
+            self.thread = threading.current_thread()
+            return super().sign_in(store, handle, password, now)
+
+        def redeem(self, store, code, password, now):
+            self.rthread = threading.current_thread()
+            return super().redeem(store, code, password, now)
+
+    fake = Slow()
+    c, _ = client(env, fake=fake)
+    assert c.post("/signin", data=FORM, headers={"Origin": OK}).status_code == 303
+    assert fake.thread is not threading.main_thread()
+    c.post("/register", data={"code": "X", "password": "correct horse battery"}, headers={"Origin": OK})
+    assert fake.rthread is not threading.main_thread() and fake.thread is not threading.main_thread()

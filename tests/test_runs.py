@@ -189,3 +189,16 @@ def test_live_runs_strips_sandbox_prefix(env):
     eng.add_event(t.id, "tool", {"step": 2, "tool": "Edit", "target": "/work/api2.py"})
     row = [r for r in runs.live_runs(st, who["chris"]) if r["name"] == t.name][0]
     assert row["doing"] == "Edit api2.py"
+
+
+def test_t_prefixed_name_resolves_by_name(env):
+    st, eng, ids, who = env
+    t = sub(eng, ids["chris"], "Fix t_fix")
+    eng.rename(t.id, "t_fix")
+    assert runs.get_run(st, who["chris"], "t_fix").id == t.id
+    assert runs.get_run(st, who["chris"], "chris/t_fix").id == t.id
+    assert runs.get_run(st, who["chris"], t.id).id == t.id
+    with pytest.raises(NotFound):
+        runs.get_run(st, who["pat"], "t_fix")
+    with pytest.raises(NotFound):
+        runs.get_run(st, who["chris"], "t_nothing")

@@ -101,3 +101,15 @@ def test_lock(st):
     row = st.query("SELECT password, locked FROM members WHERE id=?", (a,))[0]
     assert row == {"password": None, "locked": 1}
     assert len(st.query("SELECT id FROM tasks")) == 1
+
+
+def test_lock_revokes_outstanding_invites(st):
+    from slcloud import accounts
+    a = members.create_member(st, "w", "pat", "pat@example.com", "member")
+    code = accounts.create_invite(st, a, 0.0)
+    members.lock(st, a)
+    assert accounts.invite_info(st, code, 1.0) is None
+    with pytest.raises(ValueError):
+        accounts.redeem(st, code, "correct horse battery", 1.0)
+    assert st.query("SELECT locked FROM members WHERE id=?", (a,))[0]["locked"] == 1
+    assert accounts.invite_info(st, accounts.create_invite(st, a, 0.0), 1.0)  # a fresh invite still works
