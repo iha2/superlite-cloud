@@ -320,3 +320,93 @@ def test_nudge_event_masks_secret(env):
     th.join(30)
     got = [e["data"] for e in env.eng.events(t.id) if e["kind"] == "nudge"]
     assert got and got[0]["by"] == "chris" and KEY not in got[0]["text"]
+
+
+class _TurnProc:
+    def __init__(self, gen):
+        self.gen = gen
+        self.killed = False
+
+    def write(self, text):
+        pass
+
+    def lines(self):
+        return self.gen()
+
+    def close_stdin(self):
+        pass
+
+    def wait(self):
+        return None
+
+    def kill(self):
+        self.killed = True
+
+
+def test_cursor_queued_nudge_resumes_through_worker(env, monkeypatch):
+    from slcloud.drivers.cursor import CursorDriver
+
+    t = submit(env, "go cursor", name="cur_run")
+    box = {"argvs": [], "seen": []}
+    driver = []
+
+    def status(nid):
+        return env.store.query("SELECT status FROM nudges WHERE id=?", (nid,))[0]["status"]
+
+    def turn1():
+        yield '{"type":"system","session_id":"c_1"}'
+        box["nid"] = env.eng.add_nudge(t.id, env.chris, "use v2")
+        deadline = time.time() + 10
+        while time.time() < deadline and not driver[0].queue:
+            time.sleep(0.02)
+        time.sleep(0.4)  # several pump polls: queued stays pending, is not re-queued
+        box["seen"].append((status(box["nid"]), list(driver[0].queue)))
+        yield '{"type":"result","result":"one","session_id":"c_1"}'
+
+    def turn2():
+        box["seen"].append((status(box["nid"]), list(driver[0].queue)))
+        yield '{"type":"result","result":"two","session_id":"c_1"}'
+
+    turns = iter([turn1, turn2])
+
+    def start(argv):
+        box["argvs"].append(argv)
+        return _TurnProc(next(turns))
+
+    def fake_get_driver(agent, _start, session=None):
+        driver.append(CursorDriver(start, session))
+        return driver[0]
+
+    monkeypatch.setattr(worker, "get_driver", fake_get_driver)
+    r = worker.run_task(t, env.deps)
+    assert r.status == "done", r.error
+    assert len(box["argvs"]) == 2 and box["argvs"][1][-1] == "use v2"
+    assert box["argvs"][1][box["argvs"][1].index("--resume") + 1] == "c_1"
+    assert box["seen"][0] == ("queued", ["use v2"])  # still pending until the resumed turn starts
+    assert box["seen"][1] == ("delivered", [])
+    assert status(box["nid"]) == "delivered"
+    assert ("notice", "nudges are off") not in texts(env, t.id)
+    assert ("nudge", "use v2") in texts(env, t.id)
+    assert ("result", "two") in texts(env, t.id)
+
+
+def test_failed_handshake_kills_sandbox(env, monkeypatch):
+    procs = []
+
+    class Boom:
+        proc = None
+        stopped = False
+
+        def start(self, prompt):
+            self.proc = _TurnProc(lambda: iter(()))
+            procs.append(self.proc)
+            raise RuntimeError("initialize: no response")
+
+        def stop(self):
+            self.stopped = True
+
+    monkeypatch.setattr(worker, "get_driver", lambda agent, start, session=None: Boom())
+    t = submit(env, "go")
+    r = worker.run_task(t, env.deps)
+    assert r.status == "failed" and "no response" in r.error
+    assert procs[0].killed

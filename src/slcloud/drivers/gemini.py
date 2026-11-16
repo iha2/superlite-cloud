@@ -9,27 +9,36 @@ class GeminiDriver(RpcDriver):
     cwd = "/work"
 
     def _prompt(self, text: str) -> int:
-        rid = self._send("session/prompt", {"sessionId": self.session,
-                                            "prompt": [{"type": "text", "text": text}]},
-                         track=False)
+        # The id becomes current under the send lock, before the request is written, so the
+        # reader can never see its response while an older prompt is still the current one.
+        return self._send("session/prompt", {"sessionId": self.session,
+                                             "prompt": [{"type": "text", "text": text}]},
+                          track=False, on_id=self._set_prompt)
+
+    def _set_prompt(self, rid: int) -> None:
         self._last_prompt = rid
-        return rid
 
     def start(self, prompt: str) -> None:
         self._last_prompt = 0
         self._launch()
-        self._call("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
-        params = {"cwd": self.cwd, "mcpServers": []}
-        if self.session:
-            self._call("session/load", {"sessionId": self.session, **params})
-        else:
-            self.session = self._call("session/new", params).get("sessionId")
-        self._prompt(prompt)
+        try:
+            self._call("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+            params = {"cwd": self.cwd, "mcpServers": []}
+            if self.session:
+                self._call("session/load", {"sessionId": self.session, **params})
+            else:
+                self.session = self._call("session/new", params).get("sessionId")
+            self._prompt(prompt)
+        except BaseException:
+            self.stop()  # the sandbox is already running; never leave it behind
+            raise
 
     def nudge(self, text: str) -> str:
         if self.proc is None or self.stopped:
             return "unsupported"
         try:
+            with self._lock:
+                self._last_prompt = 0  # the cancelled prompt's response is no longer the end
             self._send("session/cancel", {"sessionId": self.session}, notify=True)
             self._prompt(text)
         except Exception:

@@ -35,7 +35,7 @@ class RpcDriver(Driver):
 
     # -- plumbing
     def _send(self, method: str, params: dict | None = None, *, notify: bool = False,
-              track: bool = True) -> int:
+              track: bool = True, on_id: Callable[[int], None] | None = None) -> int:
         with self._lock:
             msg: dict = {"jsonrpc": "2.0", "method": method, "params": params or {}}
             rid = 0
@@ -44,6 +44,8 @@ class RpcDriver(Driver):
                 rid = msg["id"] = self._id
                 if track:
                     self._waiters[rid] = (threading.Event(), [])
+                if on_id is not None:
+                    on_id(rid)  # registered before the request can be answered
             self.proc.write(json.dumps(msg) + "\n")
         return rid
 
@@ -118,15 +120,19 @@ class CodexDriver(RpcDriver):
 
     def start(self, prompt: str) -> None:
         self._launch()
-        self._call("initialize", {"clientInfo": {"name": "slcloud", "version": "1"}})
-        self._send("initialized", notify=True)
-        if self.session:
-            res = self._call("thread/resume", {"threadId": self.session})
-        else:
-            res = self._call("thread/start", {})
-        self.session = (res.get("thread") or {}).get("id") or self.session
-        self._send("turn/start", {"threadId": self.session,
-                                  "input": [{"type": "text", "text": prompt}]}, track=False)
+        try:
+            self._call("initialize", {"clientInfo": {"name": "slcloud", "version": "1"}})
+            self._send("initialized", notify=True)
+            if self.session:
+                res = self._call("thread/resume", {"threadId": self.session})
+            else:
+                res = self._call("thread/start", {})
+            self.session = (res.get("thread") or {}).get("id") or self.session
+            self._send("turn/start", {"threadId": self.session,
+                                      "input": [{"type": "text", "text": prompt}]}, track=False)
+        except BaseException:
+            self.stop()  # the sandbox is already running; never leave it behind
+            raise
 
     def nudge(self, text: str) -> str:
         if self.proc is None or self.stopped:

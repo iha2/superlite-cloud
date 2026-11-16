@@ -1,7 +1,8 @@
 """Cursor driver: one process per turn, nudges queue and resume the same chat."""
 from __future__ import annotations
 
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 
 from slcloud.drivers.base import Driver, _json
 
@@ -14,6 +15,9 @@ class CursorDriver(Driver):
     def __init__(self, start, session: str | None = None) -> None:
         super().__init__(start, session)
         self.queue: list[str] = []
+        self._qlock = threading.Lock()
+        # Called with the number of queued nudges once the resumed turn has started.
+        self.on_resume: Callable[[int], None] | None = None
 
     def argv(self, prompt: str) -> list[str]:
         argv = ["cursor-agent", "-p", "--force", "--output-format", "stream-json"]
@@ -30,7 +34,10 @@ class CursorDriver(Driver):
     def nudge(self, text: str) -> str:
         if self.stopped or self.proc is None:
             return "unsupported"
-        self.queue.append(text)
+        with self._qlock:
+            if self.stopped:
+                return "unsupported"
+            self.queue.append(text)
         return "queued"
 
     def lines(self) -> Iterator[str]:
@@ -38,14 +45,18 @@ class CursorDriver(Driver):
             for line in self.proc.lines():
                 self.observe(line)
                 yield line
-            if self.stopped or not self.queue:
-                return
-            text, self.queue = "\n\n".join(self.queue), []
-            self.proc = self._start(self.argv(text))
+            with self._qlock:
+                if self.stopped or not self.queue:
+                    return
+                batch, self.queue = self.queue, []
+            self.proc = self._start(self.argv("\n\n".join(batch)))
+            if self.on_resume is not None:
+                self.on_resume(len(batch))
 
     def stop(self) -> None:
-        self.stopped = True
-        self.queue = []
+        with self._qlock:
+            self.stopped = True
+            self.queue = []
 
     def observe(self, line: str) -> None:
         e = _json(line)
@@ -61,6 +72,10 @@ class CursorDriver(Driver):
         if not e:
             return []
         if e.get("type") == "result":
+            with self._qlock:
+                resuming = bool(self.queue) and not self.stopped
+            if resuming and not e.get("is_error"):
+                return []  # a queued nudge resumes the chat; this turn is not the end
             return [{"kind": "status", "status": "error" if e.get("is_error") else "done"}]
         if e.get("type") == "assistant":
             content = (e.get("message") or {}).get("content") or []

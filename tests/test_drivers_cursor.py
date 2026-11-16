@@ -104,3 +104,24 @@ def test_events():
     tool = '{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"a.py"}}}}'
     assert d.events(tool) == [{"kind": "tool", "tool": "editToolCall", "target": "a.py"}]
     assert d.events("junk") == []
+
+
+def test_intermediate_result_not_terminal_while_queued():
+    d, _ = make([T1, T2])
+    d.start("go")
+    d.nudge("more")
+    assert d.events(T1[1]) == []
+    assert d.events('{"type":"result","result":"x","is_error":true}') == [{"kind": "status", "status": "error"}]
+    list(d.lines())
+    assert d.events(T2[0]) == [{"kind": "status", "status": "done"}]
+
+
+def test_on_resume_reports_batch_size():
+    d, _ = make([T1, T2])
+    got = []
+    d.on_resume = got.append
+    d.start("go")
+    d.nudge("a")
+    d.nudge("b")
+    list(d.lines())
+    assert got == [2]

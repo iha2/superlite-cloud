@@ -157,3 +157,83 @@ def test_nudge_after_stop_unsupported():
         d.stop()
         n = len(fp.sent)
         assert d.nudge("late") == "unsupported" and len(fp.sent) == n
+
+
+def silent(m):
+    return []  # never answers: every handshake call times out
+
+
+@pytest.mark.parametrize("cls", [CodexDriver, GeminiDriver])
+def test_handshake_failure_stops_driver(cls):
+    fp = FakeProc(silent)
+    d = cls(lambda argv: fp)
+    d.timeout_s = 0.05
+    with pytest.raises(Exception, match="no response"):
+        d.start("go")
+    assert fp.killed and d.stopped
+
+
+def test_gemini_session_error_stops_driver():
+    def reply(m):
+        r = {"jsonrpc": "2.0", "id": m.get("id")}
+        if m["method"] == "session/new":
+            return [{**r, "error": {"code": -1, "message": "boom"}}]
+        return [{**r, "result": {}}] if "id" in m else []
+
+    d, fp = mk(GeminiDriver, reply)
+    with pytest.raises(Exception, match="boom"):
+        d.start("go")
+    assert fp.killed
+
+
+def test_gemini_cancel_race_new_prompt_still_ends_run():
+    """The cancelled prompt answers before the replacement is sent, and the replacement
+    answers immediately; the old answer must not end the run, the new one must."""
+    state = {}
+
+    def reply(m):
+        r = {"jsonrpc": "2.0", "id": m.get("id")}
+        if m["method"] == "session/new":
+            return [{**r, "result": {"sessionId": "s_1"}}]
+        if m["method"] == "session/prompt":
+            if "first" not in state:
+                state["first"] = m["id"]
+                return []
+            return [{**r, "result": {"stopReason": "end_turn"}}]
+        if m["method"] == "session/cancel":
+            return [{"jsonrpc": "2.0", "id": state["first"], "result": {"stopReason": "cancelled"}}]
+        return [{**r, "result": {}}] if "id" in m else []
+
+    d, fp = mk(GeminiDriver, reply)
+    d.start("x")
+    assert d.nudge("use v2") == "delivered"
+    got = []
+    t = threading.Thread(target=lambda: got.extend(d.lines()), daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "reader never reached the replacement prompt's reply"
+    ends = [e for line in got for e in d.events(line)]
+    assert ends == [{"kind": "done"}]
+    assert got and json.loads(got[-1])["id"] == fp.sent[-1]["id"]
+
+
+def test_gemini_old_prompt_invalid_before_cancel_sent():
+    seen = {}
+
+    def reply(m):
+        r = {"jsonrpc": "2.0", "id": m.get("id")}
+        if m["method"] == "session/new":
+            return [{**r, "result": {"sessionId": "s_1"}}]
+        if m["method"] == "session/cancel":
+            seen["at_cancel"] = d._last_prompt
+        if m["method"] == "session/prompt":
+            seen.setdefault("at_prompt", []).append((m["id"], d._last_prompt))
+        return [{**r, "result": {}}] if "id" in m and m["method"] != "session/prompt" else []
+
+    d, fp = mk(GeminiDriver, reply)
+    d.start("x")
+    d.nudge("y")
+    assert seen["at_cancel"] == 0  # old id already invalid when the cancel goes out
+    rid, current = seen["at_prompt"][-1]
+    assert current == rid  # new id registered before its request is written
+    d.stop()

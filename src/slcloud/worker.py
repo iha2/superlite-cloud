@@ -124,6 +124,22 @@ def _pump_nudges(task, deps: Deps, driver, stop: threading.Event, secrets: list[
                  cancel: threading.Event | None = None) -> None:
     eng, off = deps.engine, False
     cancel = cancel if cancel is not None else threading.Event()
+    # Nudges a driver has queued for its next turn: still pending in the inbox until that turn starts.
+    lock, accepted = threading.Lock(), []
+
+    def resumed(count: int) -> None:
+        with lock:
+            batch, accepted[:] = accepted[:count], accepted[count:]
+        for n in batch:
+            try:
+                eng.mark_nudge(n["id"], "delivered")
+                eng.add_live_event(task.id, "nudge", {"by": _handle(deps, n["sender"]),
+                                                      "text": redact(mask(n["text"], secrets))})
+            except Exception:  # noqa: BLE001 - bookkeeping must not break the turn
+                pass
+
+    if hasattr(driver, "on_resume"):
+        driver.on_resume = resumed
     while not stop.is_set():
         try:
             if _cancelled(task, deps):
@@ -134,10 +150,16 @@ def _pump_nudges(task, deps: Deps, driver, stop: threading.Event, secrets: list[
                 if off:
                     eng.mark_nudge(n["id"], "unsupported")
                     continue
-                try:
-                    res = driver.nudge(n["text"])
-                except Exception:  # noqa: BLE001 - a broken driver means watch-only
-                    res = "unsupported"
+                with lock:
+                    if any(a["id"] == n["id"] for a in accepted):
+                        continue  # already queued in the driver; waits for the resumed turn
+                    try:
+                        res = driver.nudge(n["text"])
+                    except Exception:  # noqa: BLE001 - a broken driver means watch-only
+                        res = "unsupported"
+                    if res == "queued":
+                        accepted.append(n)
+                        continue
                 if res == "delivered":
                     eng.mark_nudge(n["id"], "delivered")
                     eng.add_live_event(task.id, "nudge",
@@ -183,7 +205,11 @@ def _run_task(task, deps: Deps, run_dir: str):
             return _gone(task, deps)
         cap = Capture(task.id, eng.add_live_event, secrets, deps.clock)
         driver = get_driver(task.agent, sb.start, session)
-        driver.start(prompt)
+        try:
+            driver.start(prompt)
+        except BaseException:
+            _kill(driver)  # a failed handshake must not leave the sandbox running
+            raise
         stop, cancel = threading.Event(), threading.Event()
         pump = threading.Thread(target=_pump_nudges, args=(task, deps, driver, stop, secrets, cancel),
                                 daemon=True)
