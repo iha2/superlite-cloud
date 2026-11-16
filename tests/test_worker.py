@@ -293,6 +293,21 @@ def test_rename_event_when_branch_taken(env):
     assert ("notice", f"renamed login_fix to {new}: branch taken on origin") in texts(env, t.id)
 
 
+def test_handback_rename_avoids_other_live_run_name(env):
+    from slcloud import names
+    git("push", "-q", env.origin, "main:refs/heads/superlite/sessions/login-fix", cwd=env.tmp / "seed")
+    other = submit(env, "unrelated work", name="login_fix_2")  # claimed: a live run holding the suffix
+    assert other.name == "login_fix_2"
+    t = submit(env, "Fix the login redirect")
+    assert t.name == "login_fix"
+    r = worker.run_task(t, env.deps)
+    assert r.status == "done", r.error
+    assert r.name not in {"login_fix", "login_fix_2"}
+    assert r.result["branch"] == "superlite/sessions/" + names.slug(r.name)
+    assert r.result["branch"] in branches(env.origin)
+    assert env.eng._load(other.id).name == "login_fix_2"
+
+
 def _wait_for(pred, secs=20):
     end = time.time() + secs
     while time.time() < end and not pred():

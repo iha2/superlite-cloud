@@ -252,11 +252,12 @@ def _run_task(task, deps: Deps, run_dir: str):
             return eng.transition(task.id, "waiting", session=driver.session or res.session,
                                   plan=mask(res.plan or res.text, secrets))
 
-        def rename(old: str, new: str) -> None:
+        def rename(old: str, new: str) -> str:
+            new = eng.rename(task.id, new).name  # reserved against other live runs; may differ
             sb.sh([*deps.cli, "session", "rename", "--slug", names.slug(old), "--to", names.slug(new)])
-            eng.rename(task.id, new)
             state["name"] = new
             eng.add_live_event(task.id, "rename", {"from": old, "to": new, "why": "branch taken on origin"})
+            return new
 
         def commit() -> None:
             sb.sh(["sh", "-c", _COMMIT], {**_GIT_ENV, "SL_MSG": f"superlite: {state['name']}"})
@@ -267,7 +268,8 @@ def _run_task(task, deps: Deps, run_dir: str):
         if _cancelled(task, deps):
             return _gone(task, deps)
         hb = gitops.safe_hand_back(cache, run_dir, task.name, task.id, set(), rename, commit, log,
-                                   os.path.join(st.data_dir, "bundles"))
+                                   os.path.join(st.data_dir, "bundles"),
+                                   live=lambda: eng.live_names(task.id))
         eng.add_live_event(task.id, "handback", {"text": f"handed back on {hb.branch}"})
         eng.add_live_event(task.id, "result", {"text": final})
         result = {k: mask(v, secrets) if isinstance(v, str) else v
