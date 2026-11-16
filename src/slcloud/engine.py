@@ -187,6 +187,18 @@ class Engine:
         self.store.exec("INSERT INTO events(task,kind,data,at) VALUES(?,?,?,?)",
                         (task_id, kind, json.dumps(data), _now()))
 
+    def add_live_event(self, task_id: str, kind: str, data: dict) -> bool:
+        """Add an event unless the run is cancelled (atomic), so nothing follows `cancelled`."""
+        n = self.store.exec(
+            "INSERT INTO events(task,kind,data,at) SELECT ?,?,?,? "
+            "WHERE EXISTS (SELECT 1 FROM tasks WHERE id=? AND status!='cancelled')",
+            (task_id, kind, json.dumps(data), _now(), task_id))
+        return bool(n)
+
+    def is_cancelled(self, task_id: str) -> bool:
+        rows = self.store.query("SELECT status FROM tasks WHERE id=?", (task_id,))
+        return bool(rows) and rows[0]["status"] == "cancelled"
+
     def events(self, task_id: str, after: int = 0) -> list[dict]:
         rows = self.store.query(
             "SELECT id,kind,data,at FROM events WHERE task=? AND id>? ORDER BY id", (task_id, after))

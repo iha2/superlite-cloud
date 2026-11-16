@@ -18,17 +18,34 @@ def _get_run(store, who, ref):
     return runs.get_run(store, who, ref)
 
 
+def _seen(store, who, task) -> None:
+    from . import runs
+
+    runs.mark_seen_run(store, who.member, task.id)
+
+
+TERMINAL = ("done", "failed", "cancelled")
+
+
 def sse_lines(engine, task_id: str, after: int, alive: Callable[[], bool],
               sleep: Callable[[float], None], keepalive_s: float = 15.0,
               clock: Callable[[], float] = time.monotonic,
-              run: str | None = None) -> Iterator[str]:
-    """Yield SSE frames for events after `after` until alive() is False."""
+              run: str | None = None,
+              finished: Callable[[], bool] | None = None) -> Iterator[str]:
+    """Yield SSE frames for events after `after` until alive() is False, or until the run is
+    terminal (done, failed, cancelled) and its remaining events are flushed."""
     last = after
     quiet_since = clock()
+    ending = False
     while alive():
+        term = ending or (finished is not None and finished())  # read before the fetch
         fresh = [e for e in engine.events(task_id, after=last) if e["id"] > last]
+        if term and not fresh:
+            return
         if fresh:
             for e in fresh:
+                if e["kind"] == "status" and (e.get("data") or {}).get("to") in TERMINAL:
+                    ending = True
                 data = dict(e.get("data") or {})
                 if run is not None:
                     data = {"run": run, **data}
@@ -40,7 +57,8 @@ def sse_lines(engine, task_id: str, after: int, alive: Callable[[], bool],
             quiet_since = clock()
         if not alive():
             return
-        sleep(1.0)
+        if not ending:
+            sleep(1.0)
 
 
 def make_router(store, engine, whoami: Callable) -> APIRouter:
@@ -56,6 +74,7 @@ def make_router(store, engine, whoami: Callable) -> APIRouter:
             task = _get_run(store, who, ref)
         except NotFound:
             return nf()
+        _seen(store, who, task)
         hdr = request.headers.get("last-event-id", "")
         if hdr.isdigit():
             after = int(hdr)
@@ -67,7 +86,13 @@ def make_router(store, engine, whoami: Callable) -> APIRouter:
             except NotFound:
                 return False
 
-        gen = sse_lines(engine, task.id, after, alive, time.sleep, run=task.name)
+        def finished() -> bool:
+            try:
+                return getattr(_get_run(store, who, ref), "status", None) in TERMINAL
+            except NotFound:
+                return True
+
+        gen = sse_lines(engine, task.id, after, alive, time.sleep, run=task.name, finished=finished)
         return StreamingResponse(gen, media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache"})
 
@@ -81,6 +106,9 @@ def make_router(store, engine, whoami: Callable) -> APIRouter:
         text = str(body.get("text", "")).strip()
         if not text:
             return JSONResponse({"error": "text required"}, status_code=400)
+        if getattr(task, "status", None) in TERMINAL:
+            return JSONResponse({"error": f"{task.name} has ended"}, status_code=409)
+        _seen(store, who, task)
         nid = engine.add_nudge(task.id, who.member, text)
         return {"id": nid, "status": "queued"}
 

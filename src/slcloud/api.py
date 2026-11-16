@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from . import learning, runs
+from . import learning, members, runs
 from .config import Settings
 from .errors import BadTransition, Forbidden, HandleTaken, NotFound, Rejected
 from .store import Store
@@ -83,20 +83,30 @@ def create_app(settings: Settings, store: Store, engine, whoami) -> FastAPI:
         runs.mark_seen(store, p.member)
         return out
 
+    @app.get("/api/me")
+    def me():
+        return runs.me(store, whoami())
+
     @app.get("/api/status")
     def status():
-        return {"notices": runs.notices(store, whoami().member)}
+        p = whoami()  # reading status never marks notices seen
+        return {"notices": runs.notices(store, p.member), "runs": runs.live_runs(store, p)}
 
     @app.post("/api/runs/{ref:path}/give")
     def give(ref: str, body: dict = Body(...)):
         email = body.get("email")
         if not email or not isinstance(email, str):
             raise Rejected("missing field: email")
-        return runs.give(store, engine, whoami(), ref, email).public()
+        out = runs.give(store, engine, whoami(), ref, email).public()
+        target = members.member_by_email(store, email)  # give() already proved it exists
+        if target:
+            out.update(to_handle=target["handle"], to_email=target["email"])
+        return out
 
     @app.get("/api/runs/{ref:path}/attach")
     def attach(ref: str):
         t = run_of(ref)
+        runs.mark_seen_run(store, whoami().member, t.id)
         return {"run": t.name, "id": t.id, "status": t.status}
 
     @app.post("/api/tasks/{ref:path}/respond")

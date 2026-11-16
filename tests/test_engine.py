@@ -243,3 +243,11 @@ def test_nudge_order(eng):
     got = eng.pending_nudges(t.id)
     assert [n["id"] for n in got] == [a, c]
     assert got[0]["sender"] == "m_1" and got[0]["text"] == "first" and "at" in got[0]
+
+
+def test_add_live_event_skipped_when_cancelled(eng):
+    t = sub(eng)
+    assert eng.add_live_event(t.id, "notice", {"msg": "a"}) is True
+    eng.cancel("w1", t.id)
+    assert eng.add_live_event(t.id, "notice", {"msg": "b"}) is False
+    assert eng.events(t.id)[-1]["kind"] == "status" and eng.is_cancelled(t.id)

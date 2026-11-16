@@ -62,3 +62,10 @@ def test_status_never_throttled():
     c.feed({"kind": "status", "status": "done"})
     assert [e[1] for e in ev] == ["text", "status", "file", "status"]
     assert [e[2]["step"] for e in ev] == [1, 2, 3, 4]
+
+
+def test_strips_sandbox_prefix():
+    c, ev, _ = make()
+    c.feed({"kind": "tool", "tool": "Edit", "target": "/work/api2.py"})
+    c.feed({"kind": "file", "path": "/work/src/a.py"})
+    assert ev[0][2]["target"] == "api2.py" and ev[1][2]["path"] == "src/a.py"

@@ -8,6 +8,14 @@ from slcloud.adapters import redact
 from slcloud.vault import mask
 
 MAX_TEXT = 200
+SANDBOX_ROOT = "/work/"
+
+
+def rel(path):
+    """Show a sandbox path relative to the checkout: /work/api.py -> api.py."""
+    if isinstance(path, str) and path.startswith(SANDBOX_ROOT) and len(path) > len(SANDBOX_ROOT):
+        return path[len(SANDBOX_ROOT):]
+    return path
 _KINDS = {"text", "tool", "file", "status"}
 
 
@@ -48,7 +56,8 @@ class Capture:
                 self._emit_text()
             return
         self._emit_text()
-        data = {k: self._clean(v, 500) for k, v in event.items() if k != "kind"}
+        data = {k: self._clean(rel(v) if k in ("target", "path") else v, 500)
+                for k, v in event.items() if k != "kind"}
         self._emit(kind, data)
 
     def flush(self) -> None:

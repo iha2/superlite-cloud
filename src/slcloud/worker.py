@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from slcloud import gitops, names, repocache
-from slcloud.adapters import PLAN_MARKER, get_adapter
+from slcloud.adapters import PLAN_MARKER, get_adapter, redact
 from slcloud.capture import Capture
 from slcloud.drivers import get_driver
 from slcloud.sandbox import Job, Mount
@@ -41,7 +41,21 @@ class Deps:
         "bash", "/opt/superlite/skills/swarm/scripts/superlite-cli"])
 
 
+def _cancelled(task, deps: Deps) -> bool:
+    try:
+        return deps.engine.is_cancelled(task.id)
+    except Exception:  # noqa: BLE001 - an unreadable status is not a cancel
+        return False
+
+
+def _gone(task, deps: Deps):
+    """The cancelled task, as left by the user; the worker changes and emits nothing more."""
+    return deps.engine._load(task.id)
+
+
 def _fail(task, deps: Deps, message: str, secrets: list[str] | None = None):
+    if _cancelled(task, deps):
+        return _gone(task, deps)
     text = mask(message, secrets or [])
     return deps.engine.transition(task.id, "failed", error=text[-2000:])
 
@@ -96,10 +110,26 @@ def _handle(deps: Deps, member: str) -> str:
     return rows[0]["handle"] if rows else member
 
 
-def _pump_nudges(task, deps: Deps, driver, stop: threading.Event, secrets: list[str]) -> None:
+def _kill(driver) -> None:
+    """Stop the agent now: end its input, then kill the sandbox job (container removed too)."""
+    try:
+        driver.stop()
+    finally:
+        proc = getattr(driver, "proc", None)
+        if proc is not None:
+            proc.kill()
+
+
+def _pump_nudges(task, deps: Deps, driver, stop: threading.Event, secrets: list[str],
+                 cancel: threading.Event | None = None) -> None:
     eng, off = deps.engine, False
+    cancel = cancel if cancel is not None else threading.Event()
     while not stop.is_set():
         try:
+            if _cancelled(task, deps):
+                cancel.set()
+                _kill(driver)
+                return
             for n in eng.pending_nudges(task.id):
                 if off:
                     eng.mark_nudge(n["id"], "unsupported")
@@ -110,12 +140,13 @@ def _pump_nudges(task, deps: Deps, driver, stop: threading.Event, secrets: list[
                     res = "unsupported"
                 if res == "delivered":
                     eng.mark_nudge(n["id"], "delivered")
-                    eng.add_event(task.id, "nudge",
-                                  {"text": f"nudge from {_handle(deps, n['sender'])}"})
+                    eng.add_live_event(task.id, "nudge",
+                                       {"by": _handle(deps, n["sender"]),
+                                        "text": redact(mask(n["text"], secrets))})
                 else:
                     off = True
                     eng.mark_nudge(n["id"], "unsupported")
-                    eng.add_event(task.id, "notice", {"text": "nudges are off"})
+                    eng.add_live_event(task.id, "notice", {"text": "nudges are off"})
         except Exception:  # noqa: BLE001 - polling must never kill the run
             pass
         stop.wait(deps.poll)
@@ -148,11 +179,13 @@ def _run_task(task, deps: Deps, run_dir: str):
             sb.sh([*deps.cli, "session", "create", "--slug", names.slug(task.name),
                    "--base", task.base, "--branch-name", "superlite"])
 
-        cap = Capture(task.id, eng.add_event, secrets, deps.clock)
+        if _cancelled(task, deps):
+            return _gone(task, deps)
+        cap = Capture(task.id, eng.add_live_event, secrets, deps.clock)
         driver = get_driver(task.agent, sb.start, session)
         driver.start(prompt)
-        stop = threading.Event()
-        pump = threading.Thread(target=_pump_nudges, args=(task, deps, driver, stop, secrets),
+        stop, cancel = threading.Event(), threading.Event()
+        pump = threading.Thread(target=_pump_nudges, args=(task, deps, driver, stop, secrets, cancel),
                                 daemon=True)
         pump.start()
         end = None
@@ -162,15 +195,21 @@ def _run_task(task, deps: Deps, run_dir: str):
                     end = _turn_end(ev) or end
                     if _turn_end(ev) is None:
                         cap.feed(ev)
-                if end:
+                if end or cancel.is_set():
                     break
         finally:
             stop.set()
             pump.join(5)
-            cap.flush()
-            driver.stop()
+            if _cancelled(task, deps):
+                cancel.set()
+                _kill(driver)
+            else:
+                cap.flush()
+                driver.stop()
         proc = getattr(driver, "proc", None)
         r = proc.wait() if proc is not None else None
+        if cancel.is_set() or _cancelled(task, deps):
+            return _gone(task, deps)
         if r is not None and r.timed_out:
             return _fail(task, deps, "timed out")
         res = driver.result()
@@ -179,7 +218,9 @@ def _run_task(task, deps: Deps, run_dir: str):
             return _fail(task, deps, err, secrets)
         if end == "error" or not res.ok:
             return _fail(task, deps, res.text or "agent failed", secrets)
+        final = mask(res.text or res.plan or "", secrets)
         if res.plan or PLAN_MARK in (res.text or ""):
+            eng.add_live_event(task.id, "result", {"text": final})
             return eng.transition(task.id, "waiting", session=driver.session or res.session,
                                   plan=mask(res.plan or res.text, secrets))
 
@@ -187,16 +228,20 @@ def _run_task(task, deps: Deps, run_dir: str):
             sb.sh([*deps.cli, "session", "rename", "--slug", names.slug(old), "--to", names.slug(new)])
             eng.rename(task.id, new)
             state["name"] = new
+            eng.add_live_event(task.id, "rename", {"from": old, "to": new, "why": "branch taken on origin"})
 
         def commit() -> None:
             sb.sh(["sh", "-c", _COMMIT], {**_GIT_ENV, "SL_MSG": f"superlite: {state['name']}"})
 
         def log(msg: str) -> None:
-            eng.add_event(task.id, "notice", {"text": msg})
+            eng.add_live_event(task.id, "notice", {"text": msg})
 
+        if _cancelled(task, deps):
+            return _gone(task, deps)
         hb = gitops.safe_hand_back(cache, run_dir, task.name, task.id, set(), rename, commit, log,
                                    os.path.join(st.data_dir, "bundles"))
-        eng.add_event(task.id, "handback", {"text": f"handed back on {hb.branch}"})
+        eng.add_live_event(task.id, "handback", {"text": f"handed back on {hb.branch}"})
+        eng.add_live_event(task.id, "result", {"text": final})
         result = {k: mask(v, secrets) if isinstance(v, str) else v
                   for k, v in dataclasses.asdict(hb).items()}
         return eng.transition(task.id, "done", result=result)

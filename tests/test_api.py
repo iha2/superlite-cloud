@@ -145,6 +145,14 @@ def test_give_by_email():
     assert c.post("/api/runs/login_fix/give", json={}).status_code == 400
 
 
+def test_give_response_has_recipient_handle_and_email():
+    from slcloud import members
+    c, store = client("member")
+    members.create_member(store, "w1", "pat", "pat@example.com", "member")
+    r = c.post("/api/runs/login_fix/give", json={"email": "PAT@example.com"})
+    assert r.json()["to_handle"] == "pat" and r.json()["to_email"] == "pat@example.com"
+
+
 def test_give_unknown_member_404(monkeypatch):
     from slcloud import runs
     owners = []
@@ -178,7 +186,7 @@ def test_status_marks(fake_runs):
     c, _ = client("member")
     assert c.get("/api/status").json()["notices"][0]["task"] == "t_1"
     c.get("/api/tasks")
-    assert c.get("/api/status").json() == {"notices": []}
+    assert c.get("/api/status").json() == {"notices": [], "runs": []}
 
 
 def test_member_cannot_approve():
@@ -250,3 +258,36 @@ def test_notifier_post_failure_swallowed():
         raise RuntimeError("down")
     Notifier(store, post=post)(FakeTask())
     assert len(n) == 2
+
+
+def test_me_route():
+    c, st = client("member", member="m1")
+    st.exec("INSERT INTO members(id,workspace,handle,email,role) VALUES('m1','w1','chris','chris@example.com','member')")
+    st.exec("INSERT INTO workspaces(id,name,created) VALUES('w1','acme','c')")
+    assert c.get("/api/me").json() == {"handle": "chris", "email": "chris@example.com",
+                                       "role": "member", "workspace": "acme"}
+
+
+def test_status_has_runs_and_keeps_notices(fake_runs):
+    from slcloud.engine import Engine
+    c, st = client("member", member="m1")
+    eng = Engine(st)
+    t = eng.submit("w1", "r", "Fix the login redirect", "claude", "main", owner="m1")
+    eng.claim()
+    eng.add_event(t.id, "tool", {"step": 14, "tool": "Edit", "target": "api.py"})
+    body = c.get("/api/status").json()
+    assert body["runs"] == [{"name": "login_fix", "status": "running", "step": 14,
+                             "doing": "Edit api.py", "agent": "claude"}]
+    assert body["notices"][0]["task"] == "t_1"
+    assert fake_runs.seen == []  # status never marks notices seen
+    eng.transition(t.id, "done")
+    assert c.get("/api/status").json()["runs"] == []
+
+
+def test_attach_marks_that_run_seen():
+    c, st = client("member", member="m1")
+    st.exec("INSERT INTO notices(member,task,text,seen) VALUES('m1',?,'a',0)", (PUB["id"],))
+    st.exec("INSERT INTO notices(member,task,text,seen) VALUES('m1','t_other','b',0)")
+    r = c.get("/api/runs/login_fix/attach")
+    assert r.json() == {"run": "login_fix", "id": PUB["id"], "status": "queued"}
+    assert [x["seen"] for x in st.query("SELECT seen FROM notices ORDER BY id")] == [1, 0]

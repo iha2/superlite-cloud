@@ -41,6 +41,8 @@ FAKE_CLAUDE = textwrap.dedent('''\
     text = "all done"
     if prompt.startswith("slow"):
         time.sleep(0.8)
+    if prompt.startswith("hang"):
+        time.sleep(60)
     if prompt.startswith("plan"):
         text = "Plan ready. Reply approve to start"
     if prompt.startswith("wait"):
@@ -166,7 +168,8 @@ def test_nudge_delivered(env):
         time.sleep(0.01)
     assert not env.eng.pending_nudges(t.id) and time.time() - t0 < 0.5
     th.join(30)
-    assert ("nudge", "nudge from chris") in texts(env, t.id)
+    nudges = [e["data"] for e in env.eng.events(t.id) if e["kind"] == "nudge"]
+    assert nudges == [{"by": "chris", "text": "use v2"}]
     row = env.store.query("SELECT status FROM nudges WHERE id=?", (nid,))[0]
     assert row["status"] == "delivered"
     assert box[0].status == "done", box[0].error
@@ -251,3 +254,69 @@ def test_commit_skips_secret_files(tmp_path):
     subprocess.run(["sh", "-c", worker._COMMIT], cwd=repo, env=envv, check=True)
     files = set(subprocess.run(["git", "ls-files"], cwd=repo, capture_output=True, text=True).stdout.split())
     assert files == {"ok.txt"}
+
+
+def _events(env, task_id, kind):
+    return [e["data"] for e in env.eng.events(task_id) if e["kind"] == kind]
+
+
+def test_result_event_on_done_and_waiting(env):
+    t = submit(env, "Fix the login redirect")
+    assert worker.run_task(t, env.deps).status == "done"
+    assert _events(env, t.id, "result") == [{"text": "all done"}]
+    kinds = [e["kind"] for e in env.eng.events(t.id)]
+    assert kinds.index("result") < len(kinds) - 1 and env.eng.events(t.id)[-1]["data"] == {"to": "done"}
+    p = submit(env, "plan the thing")
+    assert worker.run_task(p, env.deps).status == "waiting"
+    assert _events(env, p.id, "result") == [{"text": "Plan ready. Reply approve to start"}]
+
+
+def test_rename_event_when_branch_taken(env):
+    git("push", "-q", env.origin, "main:refs/heads/superlite/sessions/login-fix", cwd=env.tmp / "seed")
+    t = submit(env, "Fix the login redirect")
+    r = worker.run_task(t, env.deps)
+    assert r.status == "done", r.error
+    new = r.name
+    assert _events(env, t.id, "rename") == [
+        {"from": "login_fix", "to": new, "why": "branch taken on origin"}]
+    assert new != "login_fix"
+    assert ("notice", f"renamed login_fix to {new}: branch taken on origin") in texts(env, t.id)
+
+
+def _wait_for(pred, secs=20):
+    end = time.time() + secs
+    while time.time() < end and not pred():
+        time.sleep(0.02)
+    return pred()
+
+
+def test_cancel_stops_run_without_handback(env):
+    t = submit(env, "hang forever", name="cancel_me")
+    box = []
+    th = threading.Thread(target=lambda: box.append(worker.run_task(t, env.deps)))
+    th.start()
+    assert _wait_for(lambda: any(e["kind"] == "tool" for e in env.eng.events(t.id)))
+    env.eng.cancel("w1", t.id)
+    t0 = time.time()
+    th.join(10)
+    assert not th.is_alive() and time.time() - t0 < 5  # agent killed, not left to run 60s
+    assert box[0].status == "cancelled"
+    assert "superlite/sessions/cancel-me" not in branches(env.origin)
+    assert not [b for b in branches(env.origin) if b != "main"]
+    evs = env.eng.events(t.id)
+    last = max(i for i, e in enumerate(evs) if e["kind"] == "status" and e["data"] == {"to": "cancelled"})
+    assert last == len(evs) - 1, [e["kind"] for e in evs[last + 1:]]
+    assert not any(e["kind"] in ("handback", "result") for e in evs)
+    assert env.eng.get("w1", t.id).status == "cancelled"
+    assert worker.loop_once(env.deps) is False  # slot free for the next run
+
+
+def test_nudge_event_masks_secret(env):
+    t = submit(env, "wait for it", name="nudge_me")
+    th = threading.Thread(target=lambda: worker.run_task(t, env.deps))
+    th.start()
+    assert _wait_for(lambda: any(e["kind"] == "tool" for e in env.eng.events(t.id)))
+    env.eng.add_nudge(t.id, env.chris, f"use {KEY} now")
+    th.join(30)
+    got = [e["data"] for e in env.eng.events(t.id) if e["kind"] == "nudge"]
+    assert got and got[0]["by"] == "chris" and KEY not in got[0]["text"]

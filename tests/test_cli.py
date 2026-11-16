@@ -168,6 +168,14 @@ def test_key_set_failure_hides_key(tmp_path):
     assert "sk-secret" not in out + err
 
 
+def test_key_set_rejected_by_provider(tmp_path):
+    post = Poster(200, {"provider": "anthropic", "last4": None, "works": False, "message": "invalid x-api-key"})
+    code, out, err = run(["key", "set", "anthropic"], post, stdin="sk-secret-abcdef\n", tmp=tmp_path)
+    assert code == 1 and out == ""
+    assert "anthropic key rejected by provider; nothing stored" in err
+    assert "None" not in err and "sk-secret" not in err
+
+
 def test_unknown_command():
     code, _, _ = run(["bogus"])
     assert code == 2

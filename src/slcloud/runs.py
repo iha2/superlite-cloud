@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from . import members, names
+from .capture import rel
 from .errors import NotFound
 
 if TYPE_CHECKING:
@@ -76,7 +77,8 @@ def give(store: Store, engine: Engine, who: Principal, ref: str, email: str) -> 
             db.execute("UPDATE tasks SET owner=?, name=?, updated=? WHERE id=?",
                        (target["id"], name, now, task.id))
             db.execute("INSERT INTO events(task,kind,data,at) VALUES(?,?,?,?)",
-                       (task.id, "given", json.dumps({"from": task.owner, "to": target["id"], "name": name}), now))
+                       (task.id, "given", json.dumps({"from": task.owner, "to": target["handle"],
+                                               "to_email": target["email"], "name": name}), now))
             db.execute("INSERT INTO notices(member,task,by_member,text,seen,at) VALUES(?,?,?,?,0,?)",
                        (target["id"], task.id, who.member, text, now))
             db.commit()
@@ -92,3 +94,44 @@ def notices(store: Store, member: str) -> list[dict]:
 
 def mark_seen(store: Store, member: str) -> None:
     store.exec("UPDATE notices SET seen=1 WHERE member=?", (member,))
+
+
+def mark_seen_run(store: Store, member: str, task_id: str) -> None:
+    """Mark only the notices about one run seen (watching, attaching or nudging it)."""
+    store.exec("UPDATE notices SET seen=1 WHERE member=? AND task=?", (member, task_id))
+
+
+def me(store: Store, who: Principal) -> dict:
+    rows = store.query("SELECT handle, email, role FROM members WHERE id=?", (who.member,))
+    m = rows[0] if rows else {"handle": getattr(who, "handle", "") or who.member, "email": None, "role": who.role}
+    ws = store.query("SELECT name FROM workspaces WHERE id=?", (who.workspace,))
+    return {"handle": m["handle"], "email": m["email"], "role": m["role"],
+            "workspace": ws[0]["name"] if ws else who.workspace}
+
+
+def _doing(kind: str, data: dict) -> str | None:
+    if kind == "tool":
+        text = f"{data.get('tool') or ''} {rel(data.get('target')) or ''}".strip()
+    else:
+        text = str(data.get("text") or rel(data.get("path")) or rel(data.get("target")) or "").strip()
+    return text or None
+
+
+def live_runs(store: Store, who: Principal) -> list[dict]:
+    """The caller's non-terminal runs; step and doing come from the newest captured event that has a step."""
+    rows = store.query(
+        f"SELECT id, name, status, agent FROM tasks WHERE workspace=? AND owner=? AND status NOT IN {DEAD} "
+        "ORDER BY created DESC, rowid DESC", (who.workspace, who.member))
+    out = []
+    for r in rows:
+        step = doing = None
+        for ev in store.query("SELECT kind, data FROM events WHERE task=? ORDER BY id DESC LIMIT 30", (r["id"],)):
+            try:
+                data = json.loads(ev["data"]) if ev["data"] else None
+            except ValueError:
+                continue
+            if isinstance(data, dict) and isinstance(data.get("step"), int):
+                step, doing = data["step"], _doing(ev["kind"], data)
+                break
+        out.append({"name": r["name"], "status": r["status"], "step": step, "doing": doing, "agent": r["agent"]})
+    return out

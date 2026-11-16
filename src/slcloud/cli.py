@@ -112,7 +112,11 @@ def _key_set(provider, env, http, stdin, out, err) -> int:
     if status != 200:
         err.write(f"key not stored: HTTP {status}\n")
         return 1
-    out.write(f"{provider} key ending {data.get('last4', '????')} stored; works: {data.get('works')}\n")
+    if not data.get("works") or not data.get("last4"):
+        why = str(data.get("message") or "").strip()
+        err.write(f"{provider} key rejected by provider; nothing stored" + (f" ({why})" if why else "") + "\n")
+        return 1
+    out.write(f"{provider} key ending {data.get('last4')} stored; works: {data.get('works')}\n")
     return 0
 
 
