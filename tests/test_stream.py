@@ -75,6 +75,7 @@ def client(monkeypatch, hidden=False):
     app = FastAPI()
     who = SimpleNamespace(workspace="w", role="member", member="m_9f2c1a7e")
     store = Store(":memory:")
+    store.exec("INSERT INTO members(id,workspace,handle,email,role,locked) VALUES('m_9f2c1a7e','w','pat','p@x.io','member',0)")
     store.exec("INSERT INTO notices(member,task,text,seen) VALUES('m_9f2c1a7e','t_1','a',0)")
     store.exec("INSERT INTO notices(member,task,text,seen) VALUES('m_9f2c1a7e','t_2','b',0)")
     app.include_router(stream.make_router(store, eng, lambda: who))
@@ -201,9 +202,31 @@ def test_alive_and_finished_pinned_to_task_id(monkeypatch):
     monkeypatch.setattr(stream, "sse_lines", fake_sse)
     app = FastAPI()
     who = SimpleNamespace(workspace="w", role="member", member="m_9f2c1a7e")
-    app.include_router(stream.make_router(Store(":memory:"), FakeEngine(), lambda: who))
+    store = Store(":memory:")
+    store.exec("INSERT INTO members(id,workspace,handle,email,role,locked) VALUES('m_9f2c1a7e','w','pat','p@x.io','member',0)")
+    app.include_router(stream.make_router(store, FakeEngine(), lambda: who))
     assert TestClient(app).get("/api/runs/login_fix/events").status_code == 200
     refs.clear()
     assert captured["alive"]() is True
     captured["finished"]()
     assert refs == ["t_1", "t_1"]  # not the mutable name
+
+
+def test_open_stream_closes_when_member_locked_or_removed(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(stream, "_get_run",
+                        lambda s, w, r: SimpleNamespace(id="t_1", name="login_fix", status="running"))
+    monkeypatch.setattr(stream, "sse_lines", lambda e, t, a, alive, sl, **k: captured.update(alive=alive) or iter(()))
+    store = Store(":memory:")
+    store.exec("INSERT INTO members(id,workspace,handle,email,role,locked) VALUES('m_9f2c1a7e','w','pat','p@x.io','member',0)")
+    app = FastAPI()
+    who = SimpleNamespace(workspace="w", role="member", member="m_9f2c1a7e")
+    app.include_router(stream.make_router(store, FakeEngine(), lambda: who))
+    assert TestClient(app).get("/api/runs/login_fix/events").status_code == 200
+    assert captured["alive"]() is True
+    store.exec("UPDATE members SET locked=1")  # the run stays; only the member is locked
+    assert captured["alive"]() is False
+    store.exec("UPDATE members SET locked=0")
+    assert captured["alive"]() is True
+    store.exec("DELETE FROM members")
+    assert captured["alive"]() is False

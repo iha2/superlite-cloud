@@ -81,6 +81,9 @@ def make_router(store, engine, whoami: Callable) -> APIRouter:
             after = int(hdr)
 
         def alive() -> bool:
+            rows = store.query("SELECT locked FROM members WHERE id=?", (who.member,))
+            if not rows or rows[0]["locked"]:
+                return False  # a locked or removed member's open stream closes
             try:
                 _get_run(store, who, ref)
                 return True

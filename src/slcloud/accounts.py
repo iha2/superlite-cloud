@@ -77,15 +77,25 @@ def invite_info(store: Store, code: str, now: float) -> dict | None:
 
 def redeem(store: Store, code: str, password: str, now: float) -> str:
     hashed = hash_password(password)  # ValueError before the invite is spent
-    inv = _live_invite(store, code, now)
-    if not inv:
-        raise ValueError("invalid or expired invite")
-    n = store.exec(
-        "UPDATE invites SET used=1 WHERE code_hash=? AND used=0 AND expires>=?", (_sha(code), now)
-    )
-    if n != 1:
-        raise ValueError("invalid or expired invite")
-    store.exec("UPDATE members SET password=?, locked=0 WHERE id=?", (hashed, inv["member"]))
+    with store._lock:  # one transaction: members.lock() cannot slip between the invite and the member
+        inv = _live_invite(store, code, now)
+        if not inv:
+            raise ValueError("invalid or expired invite")
+        db = store._db
+        try:
+            n = db.execute(
+                "UPDATE invites SET used=1 WHERE code_hash=? AND used=0 AND expires>=?",
+                (_sha(code), now)).rowcount
+            if n != 1:
+                db.rollback()
+                raise ValueError("invalid or expired invite")
+            db.execute("UPDATE members SET password=?, locked=0 WHERE id=?", (hashed, inv["member"]))
+            db.commit()
+        except ValueError:
+            raise
+        except Exception:
+            db.rollback()
+            raise
     return inv["member"]
 
 

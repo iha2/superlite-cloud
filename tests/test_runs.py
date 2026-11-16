@@ -117,6 +117,24 @@ def test_give_one_transaction(env):
     assert after == before
 
 
+def test_stale_concurrent_give_rejected(env):
+    st, eng, ids, who = env
+    t = sub(eng, ids["chris"])
+    stale = runs.get_run(st, who["chris"], "login_fix")  # both requests authorised chris before either wrote
+    runs.give(st, eng, who["chris"], "login_fix", "pat@example.com")
+    before = st.query("SELECT * FROM events")
+    real = runs.get_run
+    runs.get_run = lambda *a, **k: stale
+    try:
+        with pytest.raises(NotFound):
+            runs.give(st, eng, who["chris"], "login_fix", "sam@example.com")
+    finally:
+        runs.get_run = real
+    assert st.query("SELECT owner FROM tasks WHERE id=?", (t.id,))[0]["owner"] == ids["pat"]
+    assert st.query("SELECT * FROM events") == before
+    assert runs.notices(st, ids["sam"]) == []
+
+
 def test_mark_seen(env):
     st, eng, ids, who = env
     sub(eng, ids["chris"])

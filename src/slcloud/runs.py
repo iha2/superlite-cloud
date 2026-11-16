@@ -74,8 +74,11 @@ def give(store: Store, engine: Engine, who: Principal, ref: str, email: str) -> 
         text = f"given by {giver} to {target['handle']} ({target['email']})"
         db = store._db
         try:
-            db.execute("UPDATE tasks SET owner=?, name=?, updated=? WHERE id=?",
-                       (target["id"], name, now, task.id))
+            moved = db.execute("UPDATE tasks SET owner=?, name=?, updated=? WHERE id=? AND owner=?",
+                               (target["id"], name, now, task.id, task.owner)).rowcount
+            if moved != 1:  # a concurrent give already moved it: this caller no longer owns the run
+                db.rollback()
+                raise NotFound("not found")
             db.execute("INSERT INTO events(task,kind,data,at) VALUES(?,?,?,?)",
                        (task.id, "given", json.dumps({"from": task.owner, "to": target["handle"],
                                                "to_email": target["email"], "name": name}), now))

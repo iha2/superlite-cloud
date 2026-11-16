@@ -69,6 +69,34 @@ def test_redeem_unlocks(store):
     assert store.query("SELECT locked FROM members")[0]["locked"] == 0
 
 
+class _Spy:
+    """Wraps the sqlite connection and records what each commit makes durable."""
+
+    def __init__(self, db):
+        self._db, self.pending, self.commits = db, [], []
+
+    def execute(self, sql, *a):
+        if sql.startswith("UPDATE"):
+            self.pending.append(sql.split()[1])
+        return self._db.execute(sql, *a)
+
+    def commit(self):
+        self.commits.append(self.pending)
+        self.pending = []
+        return self._db.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+def test_redeem_commits_invite_and_member_together(store):
+    code = accounts.create_invite(store, "m_1a2b3c4d", T0)
+    spy = store._db = _Spy(store._db)
+    accounts.redeem(store, code, PW, T0)
+    # a lock() between two commits would be undone by the second one
+    assert [c for c in spy.commits if "invites" in c] == [["invites", "members"]]
+
+
 def test_sign_in_and_session(store):
     signed_up(store)
     assert accounts.sign_in(store, "pat", "wrong", T0) is None
