@@ -6,12 +6,16 @@ services:
     env_file: .env
     environment:
       SLCLOUD_URL: ${SLCLOUD_URL:-http://localhost:8787}
+      SLCLOUD_DATA: ${SLCLOUD_DATA:-/srv/slcloud/data}
     command: ["slcloud", "serve"]
     ports:
       # Loopback only. Public traffic reaches the server through the caddy service.
       - "127.0.0.1:8787:8787"
     volumes:
-      - slcloud-data:/data
+      # A host bind mount, not a named volume. The worker passes repo cache paths under
+      # SLCLOUD_DATA to the host docker daemon as sandbox mount sources, so the path must
+      # be identical on the host, the server and the worker.
+      - ${SLCLOUD_DATA:-/srv/slcloud/data}:${SLCLOUD_DATA:-/srv/slcloud/data}
     restart: unless-stopped
 
   # Optional HTTPS front door. Start it with `docker compose --profile https up`.
@@ -40,10 +44,12 @@ services:
     env_file: .env
     environment:
       SLCLOUD_SANDBOX: docker
+      SLCLOUD_DATA: ${SLCLOUD_DATA:-/srv/slcloud/data}
       SLCLOUD_WORK: ${SLCLOUD_WORK:-/srv/slcloud/work}
     command: ["slcloud", "worker"]
     volumes:
-      - slcloud-data:/data
+      # Same host path as the server (see above), so --shared clones resolve in sandboxes.
+      - ${SLCLOUD_DATA:-/srv/slcloud/data}:${SLCLOUD_DATA:-/srv/slcloud/data}
       # The sandbox path must be identical on host and worker, because sandboxes
       # are started through the host docker daemon.
       - ${SLCLOUD_WORK:-/srv/slcloud/work}:${SLCLOUD_WORK:-/srv/slcloud/work}
@@ -54,6 +60,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  slcloud-data:
   caddy-data:
   caddy-config:

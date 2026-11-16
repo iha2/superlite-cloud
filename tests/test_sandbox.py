@@ -237,3 +237,19 @@ def test_kill_removes_container():
     p.kill()
     p.wait()
     assert rm and rm[0][1:3] == ["rm", "-f"] and rm[0][3] == calls[0][0][4]
+
+
+def test_agent_state_persisted_under_git_dir(tmp_path):
+    (tmp_path / ".git").mkdir()
+    argv = DockerRunner(docker_bin="docker").argv(job(workdir=str(tmp_path)))
+    vols = [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+    for target in ("/root/.claude", "/root/.codex", "/root/.gemini", "/root/.cursor"):
+        src = [v for v in vols if v.endswith(":" + target)]
+        assert len(src) == 1 and src[0].startswith(str(tmp_path / ".git" / "slcloud-agent"))
+    again = DockerRunner(docker_bin="docker").argv(job(workdir=str(tmp_path)))
+    assert [a for a in again if "slcloud-agent" in a] == [a for a in argv if "slcloud-agent" in a]
+
+
+def test_no_agent_state_without_checkout(tmp_path):
+    argv = DockerRunner(docker_bin="docker").argv(job(workdir=str(tmp_path)))
+    assert not any("slcloud-agent" in a for a in argv)

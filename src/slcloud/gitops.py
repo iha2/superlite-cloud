@@ -128,8 +128,9 @@ def safe_hand_back(cache, run_dir: str, name: str, task_id: str, own: set[str],
             if ok:
                 return HandBack(branch, sha, True, None, f"git fetch origin {branch}")
             os.makedirs(bundle_dir, exist_ok=True)
-            out = os.path.join(bundle_dir, f"{slug(name)}.bundle")
+            out = os.path.join(bundle_dir, f"{task_id}.bundle")
             path = cache.bundle(ref, out)
-            return HandBack(branch, sha, False, path, f"git fetch {path} {branch}")
+            return HandBack(branch, sha, False, path,
+                            f"git fetch <bundle-url> {ref}:refs/heads/{branch}")
     finally:
         cache.drop_ref(ref)

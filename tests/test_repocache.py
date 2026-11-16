@@ -141,3 +141,29 @@ def test_lock_exclusive(cache):
         assert got == [] and t.is_alive()
     t.join(2)
     assert got == [1]
+
+
+def test_git_timeout_is_bounded(monkeypatch):
+    seen = {}
+
+    def fake_run(*a, **kw):
+        seen.update(kw)
+        raise subprocess.TimeoutExpired("git", kw["timeout"])
+
+    monkeypatch.setattr(repocache.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="timed out"):
+        repocache._git(["fetch"])
+    assert seen["timeout"] and seen["timeout"] > 0
+
+
+def test_head_follows_origin_default_branch(tmp_path):
+    o = tmp_path / "o"
+    git("init", "-q", "-b", "trunk", str(o))
+    (o / "a.txt").write_text("1")
+    git("add", ".", cwd=o)
+    git("commit", "-qm", "one", cwd=o)
+    c = repocache.cache_for(str(tmp_path / "data"), "w_x", str(o))
+    c.fetch()
+    assert git("symbolic-ref", "HEAD", cwd=c.path) == "refs/heads/trunk"
+    c.light_clone("HEAD", str(tmp_path / "run"))
+    assert (tmp_path / "run" / "a.txt").read_text() == "1"

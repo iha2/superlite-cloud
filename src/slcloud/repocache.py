@@ -9,12 +9,17 @@ import subprocess
 import threading
 from contextlib import contextmanager
 
+_TIMEOUT = 600
 _SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor="]
 
 
 def _git(args: list[str], cwd: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
-    p = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True)
+    try:
+        p = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True,
+                           timeout=_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"git {args[0]} timed out") from None
     if check and p.returncode != 0:
         raise RuntimeError(f"git {args[0]} failed: {p.stderr.strip()[:300]}")
     return p
@@ -57,9 +62,19 @@ class RepoCache:
     def fetch(self) -> set[str]:
         self._ensure()
         _git(["-C", self.path, *_SAFE, "fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"])
+        self._set_head()
         self._touch()
         out = _git(["-C", self.path, "for-each-ref", "--format=%(refname:short)", "refs/heads"]).stdout
         return {ln for ln in out.splitlines() if ln}
+
+    def _set_head(self) -> None:
+        """Point the cache's HEAD at origin's default branch, so base 'HEAD' resolves."""
+        p = _git(["-C", self.path, *_SAFE, "ls-remote", "--symref", "origin", "HEAD"], check=False)
+        for ln in p.stdout.splitlines():
+            if ln.startswith("ref: refs/heads/"):
+                ref = ln.split("\t")[0][len("ref: "):]
+                _git(["-C", self.path, "symbolic-ref", "HEAD", ref], check=False)
+                return
 
     def light_clone(self, base: str, dest: str) -> None:
         self._ensure()

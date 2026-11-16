@@ -179,7 +179,7 @@ class DockerRunner:
         if self.gvisor:
             a += ["--runtime", "runsc"]
         a += ["-v", f"{job.workdir}:/work", "-w", "/work"]
-        for m in job.mounts:
+        for m in [*job.mounts, *state_mounts(job.workdir)]:
             a += ["-v", f"{m.host}:{m.path}" + (":ro" if m.read_only else "")]
         for k in job.env:
             a += ["-e", k]
@@ -214,6 +214,25 @@ class DockerRunner:
                 pass
             return JobResult(-1, _text(e.stdout), _text(e.stderr), True)
         return JobResult(p.returncode, _text(p.stdout), _text(p.stderr), False)
+
+
+# Agent session state that must survive between the per-turn containers of one run.
+_STATE_DIRS = {"claude": "/root/.claude", "codex": "/root/.codex", "gemini": "/root/.gemini",
+               "cursor": "/root/.cursor", "cursor-config": "/root/.config/cursor"}
+
+
+def state_mounts(workdir: str) -> list[Mount]:
+    """Per-run agent state, kept under the checkout's .git so it is never committed and
+    is removed with the run directory. Empty when the workdir is not a git checkout."""
+    root = os.path.join(workdir, ".git", "slcloud-agent")
+    if not os.path.isdir(os.path.join(workdir, ".git")):
+        return []
+    out = []
+    for name, target in _STATE_DIRS.items():
+        host = os.path.join(root, name)
+        os.makedirs(host, exist_ok=True)
+        out.append(Mount(host, target, False))
+    return out
 
 
 def get_runner(kind: str, gvisor: bool = False):

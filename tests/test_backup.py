@@ -59,3 +59,45 @@ def test_restore_refuses_garbage(tmp_path):
     with pytest.raises(backup.Refused):
         backup.restore(db, bad, lambda: False)
     assert val(db) == "one"
+
+
+def test_backup_does_not_follow_planted_symlink(tmp_path):
+    db, out = str(tmp_path / "a.db"), str(tmp_path / "b.bak")
+    make_db(db, "one")
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    os.symlink(victim, f"{out}.{os.getpid()}.tmp")  # the old predictable temp name
+    backup.backup(db, out)
+    assert victim.read_text() == "keep"
+    assert val(out) == "one"
+
+
+def test_temp_is_exclusive_and_private(tmp_path):
+    a = backup._temp(str(tmp_path / "o"), ".tmp")
+    b = backup._temp(str(tmp_path / "o"), ".tmp")
+    assert a != b
+    assert stat.S_IMODE(os.stat(a).st_mode) == 0o600
+
+
+def test_restore_refused_while_shared_lock_held(tmp_path):
+    db, out = str(tmp_path / "a.db"), str(tmp_path / "b.bak")
+    make_db(db, "one")
+    backup.backup(db, out)
+    make_db(db, "two")
+    held = backup.hold_shared(db)  # a server or worker process
+    try:
+        with pytest.raises(backup.Refused):
+            backup.restore(db, out, lambda: False)
+        assert val(db) == "two"
+    finally:
+        held.close()
+    backup.restore(db, out, lambda: False)
+    assert val(db) == "one"
+
+
+def test_shared_holders_coexist(tmp_path):
+    db = str(tmp_path / "a.db")
+    make_db(db, "one")
+    a, b = backup.hold_shared(db), backup.hold_shared(db)
+    a.close()
+    b.close()

@@ -195,7 +195,7 @@ def test_push_race(tmp_path):
 def test_bundle_fallback(tmp_path):
     c = FakeCache({"main"}, [False, False])
     hb, _, _ = _hb(c, tmp=tmp_path / "b")
-    assert not hb.pushed and hb.bundle and hb.bundle.endswith("login-fix.bundle")
+    assert not hb.pushed and hb.bundle and hb.bundle.endswith("t_1.bundle")
     assert c.bundled == [hb.bundle]
 
 
@@ -204,3 +204,11 @@ def test_ref_dropped(tmp_path):
     with pytest.raises(RuntimeError):
         _hb(c, tmp=tmp_path)
     assert c.dropped == ["refs/runs/t_1"]
+
+
+def test_bundle_named_by_task_id_and_url_placeholder(tmp_path):
+    c = FakeCache({"main"}, [False, False])
+    hb, _, _ = _hb(c, tmp=tmp_path / "b")
+    assert os.path.basename(hb.bundle) == "t_1.bundle"
+    assert hb.fetch == "git fetch <bundle-url> refs/runs/t_1:refs/heads/superlite/sessions/login-fix"
+    assert "/work" not in hb.fetch and str(tmp_path) not in hb.fetch
