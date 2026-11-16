@@ -22,6 +22,7 @@ class Principal:
     workspace: str
     role: str
     member: str
+    handle: str = ""
 
 
 _current: ContextVar[Principal | None] = ContextVar("slcloud_principal", default=None)
@@ -42,22 +43,38 @@ def create_workspace(store: Store, name: str) -> str:
     return wid
 
 
-def create_token(store: Store, workspace: str, role: str) -> str:
+def create_token(store: Store, workspace: str, role: str, member: str, name: str = "") -> str:
     if role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}")
     token = "slc_" + secrets.token_hex(16)
-    store.exec("INSERT INTO tokens(hash,workspace,role,created) VALUES(?,?,?,?)",
-               (_hash(token), workspace, role, _now()))
+    store.exec("INSERT INTO tokens(id,hash,workspace,role,member,name,created) VALUES(?,?,?,?,?,?,?)",
+               ("k_" + secrets.token_hex(4), _hash(token), workspace, role, member, name, _now()))
     return token
+
+
+def list_tokens(store: Store, member: str) -> list[dict]:
+    return store.query("SELECT id, name, role, created, last_used FROM tokens WHERE member=? ORDER BY created, id",
+                       (member,))
+
+
+def revoke_token(store: Store, token_id: str) -> bool:
+    return store.exec("DELETE FROM tokens WHERE id=?", (token_id,)) > 0
 
 
 def check_token(store: Store, token: str) -> Principal | None:
     if not token:
         return None
     h = _hash(token)
-    for row in store.query("SELECT hash, workspace, role FROM tokens WHERE hash=?", (h,)):
+    rows = store.query(
+        "SELECT t.id, t.hash, t.workspace, t.role, t.member, m.handle, m.locked FROM tokens t "
+        "JOIN members m ON m.id = t.member WHERE t.hash=?", (h,))
+    for row in rows:
         if hmac.compare_digest(row["hash"], h):
-            return Principal(workspace=row["workspace"], role=row["role"], member=h[:8])
+            if row["locked"]:
+                return None  # a locked member's tokens stop working at once
+            store.exec("UPDATE tokens SET last_used=? WHERE id=?", (_now(), row["id"]))
+            return Principal(workspace=row["workspace"], role=row["role"], member=row["member"],
+                             handle=row["handle"])
     return None
 
 

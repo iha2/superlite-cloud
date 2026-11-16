@@ -5,6 +5,10 @@ from slcloud.errors import BadTransition, NotFound
 from slcloud.store import Store
 
 
+def make_store():
+    return Store(":memory:")
+
+
 @pytest.fixture
 def seen():
     return []
@@ -12,18 +16,18 @@ def seen():
 
 @pytest.fixture
 def eng(seen):
-    return Engine(Store(":memory:"), notify=lambda task: seen.append((task.id, task.status)))
+    return Engine(make_store(), notify=lambda task: seen.append((task.id, task.status)))
 
 
-def sub(eng, ws="w1", prompt="add x"):
-    return eng.submit(ws, "https://g/r.git", prompt, "claude", "HEAD")
+def sub(eng, ws="w1", prompt="add x", owner="m_9f2c1a7e"):
+    return eng.submit(ws, "https://g/r.git", prompt, "claude", "HEAD", owner=owner)
 
 
 def test_submit_public(eng):
     t = sub(eng)
     d = t.public()
     assert t.id.startswith("t_") and len(t.id) == 14
-    assert set(d) == {"id", "repo", "prompt", "agent", "base", "status", "plan",
+    assert set(d) == {"id", "name", "owner", "repo", "prompt", "agent", "base", "status", "plan",
                       "result", "error", "created", "updated"}
     assert {k: d[k] for k in ("repo", "prompt", "agent", "base", "status", "plan", "result", "error")} == {
         "repo": "https://g/r.git", "prompt": "add x", "agent": "claude", "base": "HEAD",
@@ -35,7 +39,7 @@ def test_submit_public(eng):
 
 def test_unknown_agent(eng):
     with pytest.raises(ValueError):
-        eng.submit("w1", "r", "p", "nope", "HEAD")
+        eng.submit("w1", "r", "p", "nope", "HEAD", owner="m_1")
 
 
 def test_bad_transition(eng):
@@ -134,7 +138,7 @@ def test_unknown_field_and_task(eng):
 def test_notify_exception_keeps_state():
     def boom(task):
         raise RuntimeError("listener down")
-    e = Engine(Store(":memory:"), notify=boom)
+    e = Engine(make_store(), notify=boom)
     t = sub(e)
     c = e.claim()
     assert c is not None and c.id == t.id and c.status == "running"
@@ -178,3 +182,81 @@ def test_add_event_appends(eng):
 def test_add_event_unknown_task_notfound(eng):
     with pytest.raises(NotFound):
         eng.add_event("t_000000000000", "notice", {})
+
+
+def test_run_needs_owner(eng):
+    with pytest.raises(TypeError):
+        eng.submit("w1", "r", "p", "claude", "HEAD")
+
+
+def test_make_name_and_owner(eng):
+    t = eng.submit("w_ab12", "https://github.com/acme/app", "Fix the login redirect", "claude", "main",
+                   owner="m_9f2c1a7e")
+    assert (t.name, t.owner, t.status) == ("login_fix", "m_9f2c1a7e", "queued")
+    assert [x.id for x in eng.list("w_ab12", owner="m_9f2c1a7e")] == [t.id]
+    assert eng.list("w_ab12", owner="m_other") == []
+
+
+def test_free_name_scope(eng):
+    a = sub(eng, prompt="Fix the login redirect", owner="m_1")
+    b = sub(eng, prompt="Fix the login redirect", owner="m_2")
+    assert (a.name, b.name) == ("login_fix", "login_fix_2")
+    eng.claim()
+    eng.transition(a.id, "done", result={})
+    c = sub(eng, prompt="Fix the login redirect")
+    assert c.name == "login_fix"
+    other = eng.submit("w1", "https://other/repo", "Fix the login redirect", "claude", "HEAD", owner="m_3")
+    assert other.name == "login_fix"
+
+
+def test_name_override(eng):
+    with pytest.raises(ValueError):
+        eng.submit("w1", "r", "p", "claude", "HEAD", owner="m_1", name="Login Fix")
+    assert eng.submit("w1", "r", "p", "claude", "HEAD", owner="m_1", name="login_fix").name == "login_fix"
+
+
+def test_rename(eng):
+    t = sub(eng)
+    assert eng.rename(t.id, "login_fix_3").name == "login_fix_3"
+    with pytest.raises(ValueError):
+        eng.rename(t.id, "a_b_c_d")
+
+
+def test_events_after(eng):
+    t = sub(eng)
+    eng.add_event(t.id, "tool", {"step": 1})
+    eng.add_event(t.id, "tool", {"step": 2})
+    allev = eng.events(t.id)
+    n = allev[0]["id"]
+    got = eng.events(t.id, after=n)
+    assert [e["id"] for e in got] == [e["id"] for e in allev[1:]]
+    assert all(e["id"] > n for e in got)
+    assert eng.events(t.id, after=allev[-1]["id"]) == []
+
+
+def test_nudge_order(eng):
+    t = sub(eng)
+    a = eng.add_nudge(t.id, "m_1", "first")
+    b = eng.add_nudge(t.id, "m_1", "second")
+    c = eng.add_nudge(t.id, "m_2", "third")
+    eng.mark_nudge(b, "delivered")
+    got = eng.pending_nudges(t.id)
+    assert [n["id"] for n in got] == [a, c]
+    assert got[0]["sender"] == "m_1" and got[0]["text"] == "first" and "at" in got[0]
+
+
+def test_add_live_event_skipped_when_cancelled(eng):
+    t = sub(eng)
+    assert eng.add_live_event(t.id, "notice", {"msg": "a"}) is True
+    eng.cancel("w1", t.id)
+    assert eng.add_live_event(t.id, "notice", {"msg": "b"}) is False
+    assert eng.events(t.id)[-1]["kind"] == "status" and eng.is_cancelled(t.id)
+
+
+def test_rename_reserves_against_other_live_runs(eng):
+    a = sub(eng, prompt="fix login")
+    b = sub(eng, prompt="fix login")
+    assert (a.name, b.name) == ("login_fix", "login_fix_2")
+    assert eng.rename(a.id, "login_fix_2").name == "login_fix_3"
+    assert eng.rename(a.id, "login_fix").name == "login_fix"
+    assert eng.live_names(a.id) == {"login_fix_2"}

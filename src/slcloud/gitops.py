@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
+from typing import Callable
 
 from slcloud.errors import Rejected
 
@@ -83,3 +84,66 @@ def hand_back(workdir: str, branch: str, out_dir: str, push: bool = True) -> Han
     if r.returncode != 0:
         raise Rejected("bundle failed")
     return HandBack(branch, sha, False, path, f"git fetch <bundle-url> {branch}")
+
+
+_PREFIX = "superlite/sessions/"
+
+
+def _taken(cache) -> set[str]:
+    return {b[len(_PREFIX):].replace("-", "_")
+            for b in cache.fetch() if b.startswith(_PREFIX)}
+
+
+def safe_hand_back(cache, run_dir: str, name: str, task_id: str, own: set[str],
+                   rename: Callable[[str, str], str | None], commit: Callable[[], None],
+                   log: Callable[[str], None], bundle_dir: str,
+                   live: Callable[[], set[str]] | None = None) -> HandBack:
+    """Hand a run back through the shared repo cache without clobbering others.
+
+    `live` returns the names of the other live runs: a replacement name avoids those as well as
+    origin's branches. `rename` may return the name it actually reserved; that name is used.
+    An origin outage never skips recovery: the run is still committed, imported and bundled.
+    """
+    from slcloud.names import free_name, slug
+
+    ref = f"refs/runs/{task_id}"
+
+    def clash(cur: str) -> str:
+        taken = _taken(cache)
+        if cur in taken and cur not in own:
+            new = free_name(cur, taken | (live() if live else set()))
+            new = rename(cur, new) or new
+            log(f"renamed {cur} to {new}: branch taken on origin")
+            return new
+        return cur
+
+    def clash_or_keep(cur: str) -> str:
+        try:
+            return clash(cur)
+        except RuntimeError as exc:  # origin unreachable: keep the work, fall back to the bundle
+            log(f"origin unreachable, keeping {cur} locally: {str(exc)[:200]}")
+            return cur
+
+    try:
+        with cache.lock():
+            name = clash_or_keep(name)
+            commit()
+            branch = _PREFIX + slug(name)
+            sha = cache.fetch_from(run_dir, branch, into=ref)
+            ok = cache.push(ref, branch, cache.tip(branch) if name in own else "")
+            if not ok:
+                new = clash_or_keep(name)
+                if new != name:
+                    name = new
+                    branch = _PREFIX + slug(name)
+                    sha = cache.fetch_from(run_dir, branch, into=ref)
+                ok = cache.push(ref, branch, cache.tip(branch) if name in own else "")
+            if ok:
+                return HandBack(branch, sha, True, None, f"git fetch origin {branch}")
+            os.makedirs(bundle_dir, exist_ok=True)
+            out = os.path.join(bundle_dir, f"{task_id}.bundle")
+            path = cache.bundle(ref, out)
+            return HandBack(branch, sha, False, path,
+                            f"git fetch <bundle-url> {ref}:refs/heads/{branch}")
+    finally:
+        cache.drop_ref(ref)

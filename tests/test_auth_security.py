@@ -19,10 +19,14 @@ def env(tmp_path):
     s = Settings(data_dir=str(tmp_path / "d"), db_path=str(tmp_path / "d" / "x.db"),
                  work_dir=str(tmp_path / "w"), master_key="k", sandbox="process")
     a = slapp.build(s, runner=object())
-    ws_a, tok_a = slapp.init_workspace(s, "a")
-    ws_b, tok_b = slapp.init_workspace(s, "b")
+    store = a.state.store
+    ws_a, ws_b = auth.create_workspace(store, "a"), auth.create_workspace(store, "b")
+    for w, mid in ((ws_a, "m_aaaaaaaa"), (ws_b, "m_bbbbbbbb")):
+        store.exec("INSERT INTO members(id,workspace,handle,role) VALUES(?,?,?,?)", (mid, w, "h" + mid, "admin"))
+    tok_a = auth.create_token(store, ws_a, "admin", "m_aaaaaaaa")
+    tok_b = auth.create_token(store, ws_b, "admin", "m_bbbbbbbb")
     with TestClient(a) as c:
-        yield c, a.state.store, (ws_a, tok_a), (ws_b, tok_b)
+        yield c, store, (ws_a, tok_a), (ws_b, tok_b)
 
 
 def _h(tok):
@@ -63,7 +67,8 @@ def test_invalid_token(env):
 def test_check_token_non_ascii_and_surrogate_is_none(tmp_path):
     store = Store(":memory:")
     ws = auth.create_workspace(store, "t")
-    auth.create_token(store, ws, "admin")
+    store.exec("INSERT INTO members(id,workspace,handle,role) VALUES(?,?,?,?)", ("m_9f2c1a7e", ws, "h", "admin"))
+    auth.create_token(store, ws, "admin", "m_9f2c1a7e")
     assert auth.check_token(store, "slc_é中") is None
     assert auth.check_token(store, "slc_\udcff") is None
     assert auth.check_token(store, None) is None
@@ -110,3 +115,16 @@ def test_secret_comparison_is_constant_time_and_hash_keyed():
     src = inspect.getsource(auth.check_token)
     assert "hmac.compare_digest" in src
     assert "_hash(token)" in src  # the lookup key is the digest, never the raw secret
+
+
+def test_token_for_missing_member_401(env):
+    c, store, (ws, _), _ = env
+    tok = auth.create_token(store, ws, "admin", "m_ghost000")
+    assert _is_401(c.get("/api/tasks", headers=_h(tok)))
+
+
+def test_locking_member_401(env):
+    c, store, (_, tok), _ = env
+    assert c.get("/api/tasks", headers=_h(tok)).status_code == 200
+    store.exec("UPDATE members SET locked=1 WHERE id=?", ("m_aaaaaaaa",))
+    assert _is_401(c.get("/api/tasks", headers=_h(tok)))

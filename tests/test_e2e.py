@@ -3,17 +3,23 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
+import textwrap
+import threading
+import time
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from slcloud import app as slapp
+from slcloud import auth, members
 from slcloud.config import load_settings
 from slcloud.sandbox import ProcessRunner
+from slcloud.vault import Vault
 from slcloud.worker import loop_once
 
-PLAN = "Plan: add x. Reply approve to start"
 GIT = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
        "GIT_COMMITTER_EMAIL": "t@t"}
 
@@ -22,28 +28,56 @@ def git(*a, cwd=None):
     return subprocess.run(["git", *a], cwd=cwd, env=GIT, check=True, capture_output=True, text=True).stdout
 
 
-FAKE = """#!/bin/sh
-# fake claude: plans first, after --resume it writes a file
-case "$*" in
-*--resume*)
-  echo "$*" | grep -q revise && echo '{"type":"result","result":"Plan v2. Reply approve to start","session_id":"s2","is_error":false}' && exit 0
-  echo done > x.txt
-  echo '{"type":"result","result":"all done","session_id":"s1","is_error":false}';;
-*) echo '{"type":"result","result":"Plan v1. Reply approve to start","session_id":"s1","is_error":false}';;
-esac
-"""
+# Fake claude (stream-json over stdin/stdout): prompts starting "plan" end in a plan,
+# "wait" holds the turn open for one nudge, anything else just edits a file and finishes.
+FAKE_CLAUDE = textwrap.dedent("""\
+    #!{py}
+    import json, sys
+
+    def say(o):
+        print(json.dumps(o), flush=True)
+
+    def user():
+        line = sys.stdin.readline()
+        return json.loads(line)["message"]["content"] if line else None
+
+    prompt = user()
+    say({{"type": "assistant", "session_id": "s1", "message": {{"content": [
+        {{"type": "tool_use", "name": "Edit", "input": {{"file_path": "x.txt"}}}}]}}}})
+    open("x.txt", "a").write(prompt + "\\n")
+    text = "all done"
+    if prompt.startswith("plan"):
+        text = "Plan ready. Reply approve to start"
+    if prompt.startswith("wait"):
+        say({{"type": "assistant", "session_id": "s1", "message": {{"content": [
+            {{"type": "text", "text": "waiting for you"}}]}}}})
+        text = "got " + str(user())
+    say({{"type": "result", "session_id": "s1", "result": text, "is_error": False}})
+""")
+
+FAKE_CLI = textwrap.dedent("""\
+    import subprocess, sys
+    a = sys.argv[1:]
+    def g(*x): subprocess.run(["git", *x], check=True)
+    if a[1] == "create":
+        g("checkout", "-q", "-b", "superlite/sessions/" + a[a.index("--slug") + 1])
+    elif a[1] == "rename":
+        g("branch", "-m", "superlite/sessions/" + a[a.index("--slug") + 1],
+          "superlite/sessions/" + a[a.index("--to") + 1])
+""")
 
 
-@pytest.fixture
-def env(tmp_path, monkeypatch):
+def _setup(tmp_path, monkeypatch):
     bin_ = tmp_path / "bin"
     bin_.mkdir()
     c = bin_ / "claude"
-    c.write_text(FAKE)
+    c.write_text(FAKE_CLAUDE.format(py=sys.executable))
     c.chmod(c.stat().st_mode | stat.S_IEXEC)
+    cli = tmp_path / "fakecli.py"
+    cli.write_text(FAKE_CLI)
     monkeypatch.setenv("PATH", f"{bin_}:{os.environ['PATH']}")
     seed = tmp_path / "seed"
-    git("init", "-q", str(seed))
+    git("init", "-q", "-b", "main", str(seed))
     (seed / "a.txt").write_text("a")
     git("add", "-A", cwd=seed)
     git("commit", "-qm", "init", cwd=seed)
@@ -52,24 +86,54 @@ def env(tmp_path, monkeypatch):
     st = load_settings({"SLCLOUD_DATA": str(tmp_path / "d"), "SLCLOUD_MASTER_KEY": "k",
                         "SLCLOUD_SANDBOX": "process"})
     app = slapp.build(st, runner=ProcessRunner())
-    ws, tok = slapp.init_workspace(st, "team")
-    ws2, tok2 = slapp.init_workspace(st, "other")
-    from slcloud.vault import Vault
+    app.state.worker_deps.cli = [sys.executable, str(cli)]
+    app.state.worker_deps.poll = 0.1
+    tok, _ = slapp.init_workspace(st, "team", member="chris")
+    tok2, _ = slapp.init_workspace(st, "other", member="otto")
+    store = app.state.store
+    ws = store.query("SELECT workspace FROM members WHERE handle='chris'")[0]["workspace"]
+    Vault(store, "k").set(ws, "anthropic", "sk-dummy-1234")
+    pat = members.create_member(store, ws, "pat", "pat@example.com", "member")
+    tok3 = auth.create_token(store, ws, "member", pat, "pat")
+    hdr = lambda t: {"Authorization": f"Bearer {t}"}  # noqa: E731
+    return app, st, str(remote), hdr(tok), hdr(tok2), hdr(tok3)
 
-    Vault(app.state.store, "k").set(ws, "anthropic", "sk-dummy-1234")
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    app, st, remote, h, h2, h3 = _setup(tmp_path, monkeypatch)
     with TestClient(app) as client:
-        yield client, app, str(remote), {"Authorization": f"Bearer {tok}"}, {"Authorization": f"Bearer {tok2}"}
+        yield client, app, remote, h, h2, h3
 
 
-def submit(client, h, remote):
-    r = client.post("/api/tasks", json={"repo": remote, "prompt": "add x", "base": "HEAD"}, headers=h)
+@pytest.fixture
+def live(tmp_path, monkeypatch):
+    """The same app on a real socket, so the SSE stream can be read while the run is live."""
+    app, st, remote, h, *_ = _setup(tmp_path, monkeypatch)
+    srv = slapp._ProbeServer(app, tempfile.mkdtemp(prefix="slcloud-e2e-"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = "http://%s:%d" % srv.server_address
+    for _ in range(100):
+        try:
+            if httpx.get(base + "/api/health", timeout=1).status_code == 200:
+                break
+        except httpx.HTTPError:
+            time.sleep(0.1)
+    try:
+        yield base, app, remote, h
+    finally:
+        srv.server_close()
+
+
+def submit(client, h, remote, prompt="add x"):
+    r = client.post("/api/tasks", json={"repo": remote, "prompt": prompt, "base": "main"}, headers=h)
     assert r.status_code == 200, r.text
     return r.json()["id"]
 
 
 def test_flow_approve(env):
-    client, app, remote, h, _ = env
-    tid = submit(client, h, remote)
+    client, app, remote, h, *_ = env
+    tid = submit(client, h, remote, "plan add x")
     assert loop_once(app.state.worker_deps)
     t = client.get(f"/api/tasks/{tid}", headers=h).json()
     assert t["status"] == "waiting" and "Reply approve to start" in t["plan"]
@@ -78,22 +142,62 @@ def test_flow_approve(env):
     t = client.get(f"/api/tasks/{tid}", headers=h).json()
     assert t["status"] == "done", t
     assert t["result"]["pushed"] is True
-    assert f"slcloud/{tid}" in git("branch", cwd=remote)
+    assert t["result"]["branch"] in git("branch", cwd=remote)
     assert not loop_once(app.state.worker_deps)
 
 
 def test_changes_revised_plan(env):
-    client, app, remote, h, _ = env
-    tid = submit(client, h, remote)
+    client, app, remote, h, *_ = env
+    tid = submit(client, h, remote, "plan add x")
     loop_once(app.state.worker_deps)
-    client.post(f"/api/tasks/{tid}/respond", json={"answer": "revise: smaller"}, headers=h)
+    client.post(f"/api/tasks/{tid}/respond", json={"answer": "plan again: smaller"}, headers=h)
     loop_once(app.state.worker_deps)
     t = client.get(f"/api/tasks/{tid}", headers=h).json()
-    assert t["status"] == "waiting" and t["plan"].startswith("Plan v2")
+    assert t["status"] == "waiting" and t["plan"].startswith("Plan ready")
+
+
+def test_e2e_watch_and_nudge(live):
+    base, app, remote, h = live
+    r = httpx.post(base + "/api/tasks", headers=h, timeout=10,
+                   json={"repo": remote, "prompt": "wait for it", "base": "main"})
+    assert r.status_code == 200, r.text
+    tid, name = r.json()["id"], r.json()["name"]
+    worker = threading.Thread(target=loop_once, args=(app.state.worker_deps,), daemon=True)
+    worker.start()
+    seen, nudged = [], False
+    deadline = time.time() + 40
+    with httpx.stream("GET", f"{base}/api/runs/{name}/events", headers=h, timeout=45) as resp:
+        assert resp.status_code == 200
+        for line in resp.iter_lines():
+            if line.startswith("event: "):
+                seen.append(line[7:])
+            if "tool" in seen and not nudged:
+                nudged = True
+                n = httpx.post(f"{base}/api/runs/{name}/nudge", headers=h, json={"text": "use v2"})
+                assert n.status_code == 202
+            if line.startswith("data: ") and "nudge from chris" in line:
+                break
+            assert time.time() < deadline, seen
+    worker.join(40)
+    t = httpx.get(f"{base}/api/tasks/{tid}", headers=h).json()
+    assert t["status"] == "done", t
+    assert t["result"]["branch"] in git("branch", cwd=remote)
+
+
+def test_e2e_non_owner_404(env):
+    client, app, remote, h, h2, h3 = env
+    tid = submit(client, h, remote)
+    for call in (lambda: client.get(f"/api/tasks/{tid}", headers=h3),
+                 lambda: client.get(f"/api/runs/{tid}/events", headers=h3),
+                 lambda: client.post(f"/api/runs/{tid}/nudge", headers=h3, json={"text": "hi"}),
+                 lambda: client.get(f"/api/runs/{tid}/attach", headers=h3)):
+        r = call()
+        assert r.status_code == 404 and r.json() == {"error": "not found"}
+    assert client.post(f"/api/runs/{tid}/nudge", headers=h, json={"text": "hi"}).status_code == 202
 
 
 def test_mcp_over_http(env):
-    client, app, remote, h, _ = env
+    client, app, remote, h, *_ = env
     mh = {**h, "Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 
     def rpc(method, params, i):
@@ -111,9 +215,8 @@ def test_mcp_over_http(env):
 
 
 def test_401_and_cross_workspace_404(env):
-    client, app, remote, h, h2 = env
+    client, app, remote, h, h2, _ = env
     assert client.get("/api/health").status_code == 200
-    assert client.get("/setup").status_code == 200
     assert client.get("/api/tasks").status_code == 401
     assert client.get("/api/tasks", headers={"Authorization": "Bearer slc_bad"}).status_code == 401
     assert client.post("/mcp", json={}).status_code == 401
@@ -158,8 +261,76 @@ def test_docker_e2e():
         shutil.rmtree(work, ignore_errors=True)
 
 
+@pytest.mark.skipif(os.environ.get("SLCLOUD_DOCKER_E2E") != "1", reason="needs docker")
+def test_docker_start_e2e(monkeypatch):
+    from pathlib import Path
+
+    from slcloud.sandbox import DockerRunner, Job, Mount
+
+    base = Path.home() / ".cache" / "slcloud-e2e"
+    base.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(dir=base))
+    ro = Path(tempfile.mkdtemp(dir=base))
+    for d in (work, ro):
+        d.chmod(0o777)
+    (ro / "f.txt").write_text("ro-data")
+    monkeypatch.setenv("SLCLOUD_E2E_HOST_ONLY", "leak")
+    runner = DockerRunner()
+    image = "docker.io/library/alpine:3.20"
+
+    def names():
+        ps = subprocess.run([runner.docker_bin, "ps", "-a", "--format", "{{.Names}}"],
+                            capture_output=True, text=True, check=True)
+        return [n for n in ps.stdout.split() if n.startswith("slcloud-")]
+
+    before = set(names())
+    try:
+        # 1. long-lived echo loop: two lines in, two lines out, process alive between them
+        p = runner.start(Job(image, ["sh", "-c", 'while read l; do echo "got:$l"; done'], {},
+                             str(work), timeout_s=120))
+        out = p.lines()
+        p.write("one\n")
+        assert next(out) == "got:one"
+        assert p._p.poll() is None
+        p.write("two\n")
+        assert next(out) == "got:two"
+        assert p._p.poll() is None
+        assert set(names()) - before  # the named container is running
+        p.close_stdin()
+        assert p.wait().code == 0
+        assert not set(names()) - before  # 3. container removed after close
+
+        # 2. read-only mount readable, write fails; 4. only job.env is visible inside
+        script = ('cat /ro/f.txt; echo; (echo x > /ro/new.txt) 2>/dev/null && echo WROTE || echo RO; '
+                  'echo "A=$E2E_A"; echo "H=$SLCLOUD_E2E_HOST_ONLY"')
+        p = runner.start(Job(image, ["sh", "-c", script], {"E2E_A": "val"}, str(work),
+                             timeout_s=120, mounts=[Mount(str(ro), "/ro")]))
+        p.close_stdin()
+        got = list(p.lines())
+        assert p.wait().code == 0
+        assert got == ["ro-data", "RO", "A=val", "H="], got
+        assert not (ro / "new.txt").exists()
+
+        # stopping a live Proc must not leave a container behind
+        p = runner.start(Job(image, ["sleep", "60"], {}, str(work), timeout_s=120))
+        time.sleep(3)
+        assert set(names()) - before
+        p.kill()
+        p.wait()
+        for _ in range(20):
+            if not set(names()) - before:
+                break
+            time.sleep(0.5)
+        assert not set(names()) - before
+    finally:
+        for n in set(names()) - before:
+            subprocess.run([runner.docker_bin, "rm", "-f", n], capture_output=True)
+        shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(ro, ignore_errors=True)
+
+
 def test_mcp_auth_isolation_and_no_secrets(env):
-    client, app, remote, h, h2 = env
+    client, app, remote, h, h2, _ = env
     mh = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
     body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
     assert client.post("/mcp", headers={**mh, "Authorization": "Bearer slc_bad"}, json=body).status_code == 401
@@ -175,7 +346,7 @@ def test_mcp_auth_isolation_and_no_secrets(env):
 
 
 def test_bundle_requires_auth_and_workspace(env):
-    client, app, remote, h, h2 = env
+    client, app, remote, h, h2, _ = env
     tid = submit(client, h, remote)
     assert client.get(f"/api/tasks/{tid}/bundle").status_code == 401
     assert client.get(f"/api/tasks/{tid}/bundle", headers=h2).status_code == 404
@@ -183,9 +354,9 @@ def test_bundle_requires_auth_and_workspace(env):
 
 
 def test_init_workspace_token_valid_and_run_worker_stops(env):
-    client, app, remote, h, _ = env
+    client, app, remote, h, *_ = env
     st = app.state.worker_deps.settings
-    ws, tok = slapp.init_workspace(st, "third")
+    tok, _ = slapp.init_workspace(st, "third", member="thea")
     assert client.get("/api/tasks", headers={"Authorization": f"Bearer {tok}"}).json() == []
     submit(client, h, remote)
     n = {"i": 0}

@@ -1,0 +1,56 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    env:
+      # The suite makes throwaway git repos and commits in them.
+      GIT_AUTHOR_NAME: ci
+      GIT_AUTHOR_EMAIL: ci@example.com
+      GIT_COMMITTER_NAME: ci
+      GIT_COMMITTER_EMAIL: ci@example.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # superlite comes from a public git URL (see pyproject.toml), so no token is needed.
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      # Slow tests need podman or docker and are left out.
+      - name: Run tests
+        run: python -m pytest -q -m "not slow"
+
+  # Builds only, nothing is pushed. Both images install from public sources.
+  docker-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile: [Dockerfile, Dockerfile.worker]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build ${{ matrix.dockerfile }}
+        run: docker build --file ${{ matrix.dockerfile }} --tag slcloud-ci:${{ matrix.dockerfile }} .

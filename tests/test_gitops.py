@@ -90,3 +90,168 @@ def test_env_not_committed_and_relative_out(remote, tmp_path, monkeypatch):
     assert hb.bundle == str(tmp_path / "relout" / "t_3.bundle")
     assert os.path.exists(hb.bundle)
     assert ".env" not in git("ls-tree", "-r", "--name-only", "HEAD", cwd=w)
+
+
+# ---- safe_hand_back (fake RepoCache) ----
+import contextlib
+import sys
+import types
+
+SHA = "3f9e2c1" + "0" * 33
+
+
+class FakeCache:
+    def __init__(self, branches, pushes, fetch_err=False):
+        self.branches, self.pushes, self.fetch_err = set(branches), list(pushes), fetch_err
+        self.pushed, self.dropped, self.bundled, self.fetched = [], [], [], []
+
+    @contextlib.contextmanager
+    def lock(self):
+        yield
+
+    def fetch(self):
+        return set(self.branches)
+
+    def fetch_from(self, src, branch, into):
+        if self.fetch_err:
+            raise RuntimeError("boom")
+        self.fetched.append(branch)
+        return SHA
+
+    def push(self, ref, branch, expect=""):
+        self.pushed.append(branch)
+        self.expects = getattr(self, "expects", []) + [expect]
+        return self.pushes.pop(0)
+
+    def tip(self, branch):
+        return "abc123"
+
+    def bundle(self, ref, out):
+        self.bundled.append(out)
+        return out
+
+    def drop_ref(self, ref):
+        self.dropped.append(ref)
+
+
+@pytest.fixture(autouse=True)
+def _names(monkeypatch):
+    try:
+        import slcloud.names as n
+        n.free_name("a", {"a"})
+        return
+    except Exception:
+        pass
+
+    def free_name(base, taken):
+        i = 2
+        while f"{base}_{i}" in taken:
+            i += 1
+        return f"{base}_{i}" if base in taken else base
+    mod = types.ModuleType("slcloud.names")
+    mod.free_name = free_name
+    mod.slug = lambda n: n.replace("_", "-")
+    monkeypatch.setitem(sys.modules, "slcloud.names", mod)
+
+
+def _hb(cache, name="login_fix", own=(), tmp=None, live=None, rename=None):
+    calls, logs = [], []
+
+    def default_rename(a, b):
+        calls.append((a, b))
+    hb = gitops.safe_hand_back(cache, "/work/t_1", name, "t_1", set(own),
+                               rename or default_rename, lambda: calls.append("commit"),
+                               logs.append, str(tmp), live)
+    return hb, calls, logs
+
+
+def test_branch_free(tmp_path):
+    c = FakeCache({"main"}, [True])
+    hb, calls, logs = _hb(c, tmp=tmp_path)
+    assert hb == gitops.HandBack("superlite/sessions/login-fix", SHA, True, None,
+                                 "git fetch origin superlite/sessions/login-fix")
+    assert calls == ["commit"] and not logs
+
+
+def test_clash_renamed(tmp_path):
+    c = FakeCache({"main", "superlite/sessions/login-fix", "superlite/sessions/login-fix-2"}, [True])
+    hb, calls, logs = _hb(c, tmp=tmp_path)
+    assert ("login_fix", "login_fix_3") in calls
+    assert logs == ["renamed login_fix to login_fix_3: branch taken on origin"]
+    assert hb.branch == "superlite/sessions/login-fix-3"
+
+
+def test_own_branch_not_clash(tmp_path):
+    c = FakeCache({"superlite/sessions/login-fix"}, [True])
+    hb, calls, logs = _hb(c, own={"login_fix"}, tmp=tmp_path)
+    assert calls == ["commit"] and hb.branch == "superlite/sessions/login-fix"
+
+
+def test_push_race(tmp_path):
+    c = FakeCache({"main"}, [False, True])
+
+    def fetch2():
+        return {"main"} if not c.pushed else {"main", "superlite/sessions/login-fix"}
+    c.fetch = fetch2
+    hb, calls, logs = _hb(c, tmp=tmp_path)
+    assert [x for x in calls if x != "commit"] == [("login_fix", "login_fix_2")]
+    assert hb.pushed and hb.branch == "superlite/sessions/login-fix-2"
+    assert c.pushed == ["superlite/sessions/login-fix", "superlite/sessions/login-fix-2"]
+
+
+def test_bundle_fallback(tmp_path):
+    c = FakeCache({"main"}, [False, False])
+    hb, _, _ = _hb(c, tmp=tmp_path / "b")
+    assert not hb.pushed and hb.bundle and hb.bundle.endswith("t_1.bundle")
+    assert c.bundled == [hb.bundle]
+
+
+def test_ref_dropped(tmp_path):
+    c = FakeCache({"main"}, [True], fetch_err=True)
+    with pytest.raises(RuntimeError):
+        _hb(c, tmp=tmp_path)
+    assert c.dropped == ["refs/runs/t_1"]
+
+
+def test_bundle_named_by_task_id_and_url_placeholder(tmp_path):
+    c = FakeCache({"main"}, [False, False])
+    hb, _, _ = _hb(c, tmp=tmp_path / "b")
+    assert os.path.basename(hb.bundle) == "t_1.bundle"
+    assert hb.fetch == "git fetch <bundle-url> refs/runs/t_1:refs/heads/superlite/sessions/login-fix"
+    assert "/work" not in hb.fetch and str(tmp_path) not in hb.fetch
+
+
+def test_origin_outage_still_commits_and_bundles(tmp_path):
+    c = FakeCache({"main"}, [False, False])
+
+    def down():
+        raise RuntimeError("git fetch failed: origin unreachable")
+    c.fetch = down
+    hb, calls, logs = _hb(c, tmp=tmp_path / "b")
+    assert calls == ["commit"]  # the run was committed despite the outage
+    assert c.fetched == ["superlite/sessions/login-fix"]  # and imported into the cache
+    assert not hb.pushed and hb.bundle and c.bundled == [hb.bundle]
+    assert any("origin unreachable" in m for m in logs)
+
+
+def test_replacement_avoids_other_live_runs(tmp_path):
+    c = FakeCache({"main", "superlite/sessions/login-fix"}, [True])
+    hb, calls, _ = _hb(c, tmp=tmp_path, live=lambda: {"login_fix_2"})
+    assert ("login_fix", "login_fix_3") in calls
+    assert hb.branch == "superlite/sessions/login-fix-3"
+
+
+def test_reserved_name_from_rename_is_used(tmp_path):
+    c = FakeCache({"main", "superlite/sessions/login-fix"}, [True])
+    hb, _, logs = _hb(c, tmp=tmp_path, rename=lambda a, b: "login_fix_9")
+    assert hb.branch == "superlite/sessions/login-fix-9"
+    assert logs == ["renamed login_fix to login_fix_9: branch taken on origin"]
+
+
+def test_new_branch_push_expects_absent_and_owned_expects_tip(tmp_path):
+    c = FakeCache({"main"}, [True])
+    _hb(c, tmp=tmp_path)
+    assert c.expects == [""]
+    c = FakeCache({"superlite/sessions/login-fix"}, [True])
+    _hb(c, own={"login_fix"}, tmp=tmp_path)
+    assert c.expects == ["abc123"]

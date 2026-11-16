@@ -15,8 +15,13 @@ def test_compose_services():
     services = _compose()["services"]
     assert "server" in services
     assert "worker" in services
-    assert "8787:8787" in services["server"]["ports"]
-    assert any(str(v).split(":")[-1] == "/data" for v in services["server"]["volumes"])
+    assert "127.0.0.1:8787:8787" in services["server"]["ports"]
+    binds = {n: [str(v) for v in services[n]["volumes"] if "SLCLOUD_DATA" in str(v)]
+             for n in ("server", "worker")}
+    for mounts in binds.values():  # host path == container path, so sandboxes can bind it
+        (src, dst), = [m.rsplit(":${", 1) for m in mounts]
+        assert src.startswith("${SLCLOUD_DATA") and "${" + dst == src
+    assert "slcloud-data" not in _compose().get("volumes", {})
     assert " ".join(services["worker"]["command"]) == "slcloud worker"
 
 

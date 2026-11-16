@@ -1,4 +1,3 @@
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -21,57 +20,91 @@ class FakeTask:
     def public(self):
         return self.d
 
+    def __getattr__(self, k):
+        return self.d[k]
+
 
 class FakeEngine:
     def __init__(self, status="queued", result=None):
         self.status, self.result = status, result
         self.calls = []
 
-    def _check(self, ws, tid):
-        if ws != "w1" or tid != ID:
-            raise NotFound(tid)
-
-    def submit(self, ws, repo, prompt, agent, base):
-        self.calls.append(("submit", ws, repo, prompt, agent, base))
+    def submit(self, ws, repo, prompt, agent, base, *, owner, name=None):
+        self.calls.append(("submit", ws, repo, prompt, agent, base, owner))
         return FakeTask(pub())
 
-    def get(self, ws, tid):
-        self._check(ws, tid)
-        return FakeTask(pub(self.status, self.result))
-
-    def list(self, ws):
+    def list(self, ws, owner=None):
         return [FakeTask(pub())] if ws == "w1" else []
 
     def respond(self, ws, tid, answer):
-        self._check(ws, tid)
         if self.status != "waiting":
             raise BadTransition("not waiting")
         return FakeTask(pub("queued"))
 
     def cancel(self, ws, tid):
-        self._check(ws, tid)
         return FakeTask(pub("cancelled"))
 
 
 @pytest.fixture
 def make(monkeypatch):
-    from slcloud import learning
+    from slcloud import learning, runs
+    from slcloud.store import Store
 
-    if not os.environ.get("SUPERLITE_REAL"):
-        monkeypatch.setattr(learning, "lessons", lambda store, ws: [
-            {"id": "l_1a2b3c4d", "text": "run lint first", "proposed_by": "m1", "approved_by": "m2"}] if ws == "w1" else [])
+    store = Store(":memory:")
+    prop = learning.propose(store, "w1", "m1", "run lint first")
+    learning.approve(store, "w1", prop["id"], "m2")
+    seen = []
 
     def build(ws="w1", **kw):
+        eng = FakeEngine(**kw)
+
+        def get_run(store, who, ref):
+            if who.workspace != "w1" or ref not in (ID, "login_fix"):
+                raise NotFound(ref)
+            return FakeTask(pub(eng.status, eng.result))
+
+        monkeypatch.setattr(runs, "get_run", get_run)
+        def give(st, e, who, ref, email):
+            get_run(st, who, ref)
+            return FakeTask({**pub(), "owner": "m_1a2b3c4d", "name": "login_fix_2", "email": email})
+
+        monkeypatch.setattr(runs, "give", give)
+        monkeypatch.setattr(runs, "notices", lambda st, m: [{"id": 1, "task": "t_1", "text": "given", "seen": 0}])
+        monkeypatch.setattr(runs, "mark_seen", lambda st, m: seen.append(m))
         who = lambda: SimpleNamespace(workspace=ws, role="member", member="m1")
         settings = SimpleNamespace(public_url="http://h:8787")
-        return mcp_server.tools(FakeEngine(**kw), None, settings, who)
+        out = mcp_server.tools(eng, store, settings, who)
+        out["_eng"], out["_seen"] = eng, seen
+        return out
 
     return build
 
 
 def test_tool_names(make):
-    assert set(make()) == {"submit_task", "get_task", "list_tasks", "respond", "cancel_task",
-                           "fetch_command", "team_lessons"}
+    assert {k for k in make() if not k.startswith("_")} == {
+        "submit_task", "get_task", "list_tasks", "respond", "cancel_task", "fetch_command",
+        "team_lessons", "list_runs", "give_run", "status"}
+
+
+def test_give_run_status_list_runs(make):
+    t = make()
+    assert t["give_run"](run="login_fix", email="pat@example.com")["name"] == "login_fix_2"
+    assert t["status"]()["notices"][0]["task"] == "t_1"
+    assert [x["id"] for x in t["list_runs"]()] == [ID] and t["_seen"] == ["m1"]
+    assert make(ws="w2")["give_run"](run="login_fix", email="pat@example.com") == {"error": "not found"}
+
+
+def test_give_run_unknown_member(make, monkeypatch):
+    from slcloud import runs
+
+    def give(*a, **kw):
+        raise runs.NoSuchMember("no such member")
+
+    t = make()
+    before = t["list_runs"]()
+    monkeypatch.setattr(runs, "give", give)
+    assert t["give_run"](run="login_fix", email="nobody@example.com") == {"error": "no such member"}
+    assert t["list_runs"]() == before
 
 
 def test_build_mcp_registers_tools():
@@ -81,6 +114,9 @@ def test_build_mcp_registers_tools():
 
 def test_submit(make):
     assert make()["submit_task"](repo="r", prompt="p") == {"task_id": ID, "status": "queued"}
+    t = make()
+    t["submit_task"](repo="r", prompt="p")
+    assert t["_eng"].calls[0][-1] == "m1"
 
 
 def test_get_and_list(make):
@@ -117,7 +153,8 @@ def test_fetch_not_done(make):
 
 
 def test_team_lessons(make):
-    assert make()["team_lessons"]()[0]["text"] == "run lint first"
+    out = make()["team_lessons"]()
+    assert out[0]["text"] == "run lint first" and out[0]["proposed_by"] == "m1" and out[0]["approved_by"] == "m2"
     assert make(ws="w2")["team_lessons"]() == []
 
 

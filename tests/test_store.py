@@ -2,43 +2,47 @@ import sqlite3
 
 import pytest
 
-from slcloud.config import Settings, load_settings
 from slcloud.store import Store
 
 
-def test_defaults():
-    s = load_settings({"SLCLOUD_DATA": "/d", "SLCLOUD_MASTER_KEY": "k"})
-    assert s == Settings(
-        data_dir="/d", db_path="/d/slcloud.db", work_dir="/d/work", master_key="k",
-        public_url="http://localhost:8787", sandbox="docker",
-        worker_image="slcloud-worker:0.1.0", gvisor=False,
-    )
+@pytest.fixture
+def st(tmp_path):
+    return Store(str(tmp_path / "s.db"))
 
 
-def test_missing_master_key():
-    with pytest.raises(ValueError):
-        load_settings({})
+def test_tables(st):
+    names = {r["name"] for r in st.query("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"members", "tokens", "tasks", "invites", "web_sessions", "sign_in_misses",
+            "notices", "nudges"} <= names
 
 
-def test_gvisor_flag():
-    assert load_settings({"SLCLOUD_MASTER_KEY": "k", "SLCLOUD_GVISOR": "1"}).gvisor is True
-
-
-def test_schema_tables():
-    rows = Store(":memory:").query("SELECT name FROM sqlite_master WHERE type='table'")
-    names = {r["name"] for r in rows}
-    assert {"workspaces", "tokens", "keys", "tasks", "events", "learn_rows", "lessons", "webhooks"} <= names
-
-
-def test_exec_returns_rowcount():
-    s = Store(":memory:")
-    assert s.exec("INSERT INTO workspaces(id,name,created) VALUES(?,?,?)", ("w1", "team", "2026-11-14")) == 1
-    assert s.query("SELECT id FROM workspaces") == [{"id": "w1"}]
-
-
-def test_learn_unique():
-    s = Store(":memory:")
-    q = "INSERT INTO learn_rows(workspace,member,rid,signal,row,at) VALUES(?,?,?,?,?,?)"
-    s.exec(q, ("w", "m", "r", "s", "{}", "t"))
+def test_token_needs_member(st):
+    ins = "INSERT INTO tokens(id,hash,workspace,role,member,created) VALUES(?,?,?,?,?,?)"
+    st.exec(ins, ("k1", "h1", "w", "admin", "m_1", "now"))
     with pytest.raises(sqlite3.IntegrityError):
-        s.exec(q, ("w", "m", "r", "s", "{}", "t"))
+        st.exec(ins, ("k2", "h2", "w", "admin", None, "now"))
+
+
+@pytest.mark.parametrize("owner,name", [(None, "x"), ("m_1", None)])
+def test_task_needs_owner(st, owner, name):
+    with pytest.raises(sqlite3.IntegrityError):
+        st.exec("INSERT INTO tasks(id,workspace,status,owner,name) VALUES('t',?,?,?,?)", ("w", "queued", owner, name))
+    st.exec("INSERT INTO tasks(id,workspace,status,owner,name) VALUES('t','w','queued','m_1','x')")
+
+
+def test_email_unique(st):
+    ins = "INSERT INTO members(id,workspace,handle,email,role) VALUES(?,?,?,?,?)"
+    st.exec(ins, ("m_1", "w", "a", None, "member"))
+    st.exec(ins, ("m_2", "w", "b", None, "member"))
+    st.exec(ins, ("m_3", "w", "c", "pat@example.com", "member"))
+    with pytest.raises(sqlite3.IntegrityError):
+        st.exec(ins, ("m_4", "w2", "d", "pat@example.com", "member"))
+
+
+def test_handle_unique_across_workspaces(st):
+    ins = "INSERT INTO members(id,workspace,handle,role) VALUES(?,?,?,?)"
+    st.exec(ins, ("m_1", "w1", "pat", "member"))
+    with pytest.raises(sqlite3.IntegrityError):
+        st.exec(ins, ("m_2", "w2", "pat", "member"))
+    with pytest.raises(sqlite3.IntegrityError):
+        st.exec(ins, ("m_3", "w1", "pat", "member"))

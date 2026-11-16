@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
+import time
 
 from slcloud import learning
 from slcloud.connect import AGENTS, connect_command
-from slcloud.errors import Rejected
+from slcloud.errors import HandleTaken, Rejected
 
-USAGE = "usage: slcloud init|token create|key set <provider>|connect <agent>|sync|serve|worker"
+USAGE = ("usage: slcloud init [name] --member H|token create <ws> <role> --member H [--email E]|member list|rename|email|role"
+         "|invite H [--email E]|backup FILE|restore FILE|key set <provider>|connect <agent>|sync|serve|worker")
 
 
 def _http(method: str, url: str, token: str, body: dict | None):
@@ -109,27 +112,180 @@ def _key_set(provider, env, http, stdin, out, err) -> int:
     if status != 200:
         err.write(f"key not stored: HTTP {status}\n")
         return 1
-    out.write(f"{provider} key ending {data.get('last4', '????')} stored; works: {data.get('works')}\n")
+    if not data.get("works") or not data.get("last4"):
+        why = str(data.get("message") or "").strip()
+        err.write(f"{provider} key rejected by provider; nothing stored" + (f" ({why})" if why else "") + "\n")
+        return 1
+    out.write(f"{provider} key ending {data.get('last4')} stored; works: {data.get('works')}\n")
     return 0
 
 
+def _opts(args: list[str], allowed: tuple[str, ...]) -> tuple[list[str], dict] | None:
+    pos, opts, i = [], {}, 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("--"):
+            if a[2:] not in allowed or i + 1 >= len(args) or a[2:] in opts:
+                return None
+            opts[a[2:]] = args[i + 1]
+            i += 2
+        else:
+            pos.append(a)
+            i += 1
+    return pos, opts
+
+
+def _db_path(env) -> str:
+    return f"{env.get('SLCLOUD_DATA', '/data')}/slcloud.db"
+
+
+def _port_open(host: str = "127.0.0.1", port: int = 8787) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _workspace(store, ref: str | None) -> str | None:
+    if ref:
+        rows = store.query("SELECT id FROM workspaces WHERE id=? OR name=?", (ref, ref))
+    else:
+        rows = store.query("SELECT id FROM workspaces")
+    return rows[0]["id"] if len(rows) == 1 else None
+
+
+def _admin(argv: list[str], env, out, err, server_running) -> int:
+    from slcloud import accounts, app, auth, backup, members
+    from slcloud.config import load_settings
+    from slcloud.store import Store
+
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "backup" or cmd == "restore":
+        if len(rest) != 1:
+            return _usage(err)
+        db = _db_path(env)
+        try:
+            if cmd == "backup":
+                backup.backup(db, rest[0])
+                out.write("backup written\n")
+            else:
+                backup.restore(db, rest[0], server_running)
+                out.write("restored\n")
+        except backup.Refused as e:
+            err.write(f"refused: {e}\n")
+            return 2
+        return 0
+    if cmd == "init":
+        o = _opts(rest, ("member",))
+        if o is None or len(o[0]) > 1:
+            return _usage(err)
+        settings = load_settings(dict(env))
+        try:
+            token, invite = app.init_workspace(settings, o[0][0] if o[0] else "team", member=o[1].get("member"))
+        except HandleTaken:
+            err.write("handle taken\n")
+            return 2
+        except ValueError as e:
+            err.write(f"invalid member: {e}\n")
+            return 2
+        out.write(f"token: {token}\ninvite: {invite}\n")
+        return 0
+    if cmd == "token":
+        o = _opts(rest[1:], ("member", "email"))
+        if rest[:1] != ["create"] or o is None or len(o[0]) != 2 or "member" not in o[1]:
+            return _usage(err)
+        ref, role = o[0]
+        store = Store(_db_path(env))
+        handle, email = o[1]["member"], o[1].get("email")
+        if role not in auth.ROLES:
+            err.write(f"role must be one of {', '.join(auth.ROLES)}\n")
+            return 2
+        ws = _workspace(store, ref)
+        if ws is None:
+            err.write("no such workspace\n")
+            return 2
+        m = members.member_by_handle(store, ws, handle)
+        if m is not None:
+            if m["role"] != role:
+                err.write(f"{handle} is {m['role']}, not {role}\n")
+                return 2
+            mid = m["id"]
+        else:
+            if not email:
+                err.write(f"{handle} is new: pass --email\n")
+                return 2
+            try:
+                mid = members.create_member(store, ws, handle, email, role)
+            except HandleTaken:
+                err.write("handle taken\n")
+                return 2
+        out.write(auth.create_token(store, ws, role, mid) + "\n")
+        return 0
+    if cmd == "member":
+        sub = rest[:1]
+        o = _opts(rest[1:], ("workspace",))
+        if not sub or o is None or sub[0] not in ("list", "rename", "email", "role"):
+            return _usage(err)
+        need = 0 if sub[0] == "list" else 2
+        if len(o[0]) != need:
+            return _usage(err)
+        store = Store(_db_path(env))
+        ws = _workspace(store, o[1].get("workspace"))
+        if ws is None:
+            err.write("pass --workspace\n")
+            return 2
+        if sub[0] == "list":
+            for m in members.list_members(store, ws):
+                out.write(f"{m['handle']}  {m['email'] or '-'}  {m['role']}\n")
+            return 0
+        m = members.member_by_handle(store, ws, o[0][0])
+        if m is None:
+            err.write("no such member\n")
+            return 2
+        try:
+            {"rename": members.rename, "email": members.set_email, "role": members.set_role}[sub[0]](
+                store, m["id"], o[0][1])
+        except ValueError as e:
+            err.write(f"error: {e}\n")
+            return 2
+        return 0
+    if cmd == "invite":
+        o = _opts(rest, ("email", "workspace"))
+        if o is None or len(o[0]) != 1:
+            return _usage(err)
+        store = Store(_db_path(env))
+        ws = _workspace(store, o[1].get("workspace"))
+        m = members.member_by_handle(store, ws, o[0][0]) if ws else None
+        if m is None:
+            err.write("no such member\n")
+            return 2
+        if o[1].get("email"):
+            members.set_email(store, m["id"], o[1]["email"])
+        out.write(f"invite: {accounts.create_invite(store, m['id'], time.time())}\n")
+        return 0
+    return _usage(err)
+
+
+def _usage(err) -> int:
+    err.write(USAGE + "\n")
+    return 2
+
+
+_HELD: list = []  # shared maintenance locks: kept open for the life of the process
+
+
 def _server(cmd: list[str], env, out) -> int:
-    from slcloud import app
+    from slcloud import app, backup
     from slcloud.config import load_settings
 
     settings = load_settings(dict(env))
-    if cmd[0] == "init":
-        ws, token = app.init_workspace(settings, cmd[1] if len(cmd) > 1 else "team")
-        out.write(f"workspace {ws}\nadmin token {token}\n")
-        return 0
-    if cmd[0] == "token":
-        from slcloud import auth
-        from slcloud.store import Store
-
-        if len(cmd) < 4 or cmd[1] != "create":
-            return 2
-        out.write(auth.create_token(Store(settings.db_path), cmd[2], cmd[3]) + "\n")
-        return 0
+    os.makedirs(settings.data_dir, exist_ok=True)
+    try:
+        _HELD.append(backup.hold_shared(settings.db_path))  # restore refuses while this runs
+    except backup.Refused as e:
+        sys.stderr.write(f"refused: {e}\n")
+        return 2
     if cmd[0] == "serve":
         import uvicorn
 
@@ -139,7 +295,7 @@ def _server(cmd: list[str], env, out) -> int:
     return 0
 
 
-def main(argv=None, *, http=None, env=None, stdin=None, out=None, err=None) -> int:
+def main(argv=None, *, http=None, env=None, stdin=None, out=None, err=None, server_running=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     env = os.environ if env is None else env
     stdin, out, err = stdin or sys.stdin, out or sys.stdout, err or sys.stderr
@@ -156,7 +312,9 @@ def main(argv=None, *, http=None, env=None, stdin=None, out=None, err=None) -> i
             return _sync(env, http, out, err)
         if cmd == "key" and len(argv) == 3 and argv[1] == "set":
             return _key_set(argv[2], env, http, stdin, out, err)
-        if cmd in ("init", "serve", "worker") or (cmd == "token" and len(argv) == 4 and argv[1] == "create"):
+        if cmd in ("init", "member", "invite", "backup", "restore") or (cmd == "token" and argv[1:2] == ["create"]):
+            return _admin(argv, env, out, err, server_running or _port_open)
+        if cmd in ("serve", "worker") and len(argv) == 1:
             return _server(argv, env, out)
     except Exception as e:  # never echo secrets: report the type only
         err.write(f"error: {type(e).__name__}\n")
