@@ -251,3 +251,12 @@ def test_add_live_event_skipped_when_cancelled(eng):
     eng.cancel("w1", t.id)
     assert eng.add_live_event(t.id, "notice", {"msg": "b"}) is False
     assert eng.events(t.id)[-1]["kind"] == "status" and eng.is_cancelled(t.id)
+
+
+def test_rename_reserves_against_other_live_runs(eng):
+    a = sub(eng, prompt="fix login")
+    b = sub(eng, prompt="fix login")
+    assert (a.name, b.name) == ("login_fix", "login_fix_2")
+    assert eng.rename(a.id, "login_fix_2").name == "login_fix_3"
+    assert eng.rename(a.id, "login_fix").name == "login_fix"
+    assert eng.live_names(a.id) == {"login_fix_2"}

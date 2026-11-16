@@ -103,10 +103,20 @@ class Engine:
         return task
 
     def rename(self, task_id: str, name: str) -> Task:
+        """Rename a run; the name is reserved against the other live runs, so it may gain a suffix."""
         names.check_name(name)
-        self._load(task_id)
-        self.store.exec("UPDATE tasks SET name=?, updated=? WHERE id=?", (name, _now(), task_id))
-        return self._load(task_id)
+        with self.store._lock:
+            name = names.free_name(name, self.live_names(task_id))
+            self.store.exec("UPDATE tasks SET name=?, updated=? WHERE id=?", (name, _now(), task_id))
+            return self._load(task_id)
+
+    def live_names(self, task_id: str) -> set[str]:
+        """Names of the other live runs of the same workspace and repo."""
+        cur = self._load(task_id)
+        rows = self.store.query(
+            "SELECT name FROM tasks WHERE workspace=? AND repo IS ? AND id!=? "
+            "AND status NOT IN ('done','failed','cancelled')", (cur.ws, cur.repo, task_id))
+        return {r["name"] for r in rows}
 
     def add_nudge(self, task_id: str, sender: str, text: str) -> int:
         self._load(task_id)

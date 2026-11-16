@@ -167,3 +167,26 @@ def test_head_follows_origin_default_branch(tmp_path):
     assert git("symbolic-ref", "HEAD", cwd=c.path) == "refs/heads/trunk"
     c.light_clone("HEAD", str(tmp_path / "run"))
     assert (tmp_path / "run" / "a.txt").read_text() == "1"
+
+
+def test_push_new_branch_refused_when_created_meanwhile(cache, tmp_path, origin):
+    run = tmp_path / "run"
+    cache.light_clone("main", str(run))
+    _commit_in(run)
+    cache.fetch_from(str(run), "superlite/sessions/login-fix", "refs/runs/t_1")
+    # another client creates the branch at an ancestor of the run's commit after the clash check
+    git("branch", "superlite/sessions/login-fix", "main", cwd=origin)
+    assert cache.push("refs/runs/t_1", "superlite/sessions/login-fix") is False
+    assert git("rev-parse", "superlite/sessions/login-fix", cwd=origin) == git("rev-parse", "main", cwd=origin)
+
+
+def test_push_owned_branch_with_expected_tip(cache, tmp_path, origin):
+    run = tmp_path / "run"
+    cache.light_clone("main", str(run))
+    _commit_in(run)
+    cache.fetch_from(str(run), "superlite/sessions/login-fix", "refs/runs/t_1")
+    cache.fetch()
+    tip = cache.tip("feature")
+    assert tip and cache.tip("nope") == ""
+    assert cache.push("refs/runs/t_1", "feature", "0" * 40) is False
+    assert cache.push("refs/runs/t_1", "feature", tip) is True

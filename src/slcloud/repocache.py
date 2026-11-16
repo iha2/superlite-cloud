@@ -87,8 +87,28 @@ class RepoCache:
         _git(["-C", self.path, *_SAFE, "fetch", "--no-tags", src, f"+refs/heads/{branch}:{into}"])
         return _git(["-C", self.path, "rev-parse", into]).stdout.strip()
 
-    def push(self, ref: str, branch: str) -> bool:
-        p = _git(["-C", self.path, *_SAFE, "push", "origin", f"{ref}:refs/heads/{branch}"], check=False)
+    def tip(self, branch: str) -> str:
+        """The cached sha of a branch, or "" when it is absent."""
+        p = _git(["-C", self.path, "rev-parse", "--verify", "-q", f"refs/heads/{branch}^{{commit}}"],
+                 check=False)
+        return p.stdout.strip() if p.returncode == 0 else ""
+
+    def push(self, ref: str, branch: str, expect: str = "") -> bool:
+        """Push `ref` to `branch` only if origin's branch is still `expect` ("" = still absent).
+
+        A plain push would advance a branch another client created after the clash check; the
+        lease makes that a refusal, so the caller renames and retries. An owned branch (expect
+        is a sha) must also stay a fast-forward.
+        """
+        try:
+            if expect and _git(["-C", self.path, "merge-base", "--is-ancestor", expect, ref],
+                               check=False).returncode != 0:
+                return False
+            p = _git(["-C", self.path, *_SAFE, "push",
+                      f"--force-with-lease=refs/heads/{branch}:{expect}", "origin",
+                      f"{ref}:refs/heads/{branch}"], check=False)
+        except RuntimeError:  # timed out: origin unreachable, the caller falls back to a bundle
+            return False
         return p.returncode == 0
 
     def bundle(self, ref: str, out: str) -> str:
