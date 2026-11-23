@@ -26,8 +26,9 @@ class RpcDriver(Driver):
     cmd: list[str] = []
     timeout_s = TIMEOUT_S
 
-    def __init__(self, start: Callable[[list[str]], Proc], session: str | None = None) -> None:
-        super().__init__(start, session)
+    def __init__(self, start: Callable[[list[str]], Proc], session: str | None = None,
+                 slug: str | None = None) -> None:
+        super().__init__(start, session, slug)
         self._q: queue.Queue[str | None] = queue.Queue()
         self._waiters: dict[int, tuple[threading.Event, list]] = {}
         self._lock = threading.Lock()

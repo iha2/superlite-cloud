@@ -50,6 +50,49 @@ def test_claude_stream_json(monkeypatch):
     assert json.loads(proc.written[0])["message"]["content"] == "fix it"
 
 
+@pytest.mark.parametrize("session", [None, "s_9"])
+def test_claude_driver_isolation(session):
+    """Regression: the live path (this driver, not ClaudeAdapter) still passed --bare and acceptEdits, so
+    superlite never loaded in real runs. Same isolation flags as the adapter, never the repo's config."""
+    d, _, argvs = make(session=session)
+    d.start("x")
+    argv = argvs[0]
+    assert "--bare" not in argv and "acceptEdits" not in argv
+    assert argv[argv.index("--setting-sources") + 1] == "user"
+    assert "--strict-mcp-config" in argv and "--mcp-config" not in argv
+    assert argv[argv.index("--plugin-dir") + 1] == "/opt/superlite"
+    assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
+
+
+def test_claude_driver_stays_in_work():
+    """Regression: a live superlite run built in /work/.claude/worktrees/<x>, and the hand-back (which commits
+    /work only) came back empty. Worktree tools are disallowed and the note names the worker's session."""
+    d = get_driver("claude", lambda a: FakeProc(), None, slug="sl-headless")
+    argv = d.argv("x")
+    i = argv.index("--disallowedTools")
+    assert argv[i + 1:i + 3] == ["EnterWorktree", "ExitWorktree"]
+    note = argv[argv.index("--append-system-prompt") + 1]
+    assert "`sl-headless`" in note and "/work" in note and "worktree" in note
+    assert "--slug sl-headless" in note
+    assert "None" not in get_driver("claude", lambda a: FakeProc()).argv("x")[-1]
+
+
+def test_claude_driver_variadic_flag_order():
+    """--disallowedTools is variadic: a flag must follow its two tool names, --resume must not be swallowed,
+    and the prompt goes over stdin so no positional trails the argv."""
+    argv = get_driver("claude", lambda a: FakeProc(), "s_9", slug="x").argv("p")
+    i = argv.index("--disallowedTools")
+    assert argv[i + 3].startswith("--")
+    assert argv.index("--resume") > i + 3
+    assert argv[-2:] == ["--resume", "s_9"] and "p" not in argv
+
+
+def test_adapter_env_cannot_override_key():
+    from slcloud.adapters import ClaudeAdapter
+    assert ClaudeAdapter.key_env not in ClaudeAdapter.env
+    assert {**ClaudeAdapter.env, ClaudeAdapter.key_env: "k"}[ClaudeAdapter.key_env] == "k"
+
+
 def test_get_driver_claude_and_resume():
     d, _, argvs = make(session="s_9")
     assert isinstance(d, ClaudeDriver) and d.session == "s_9"

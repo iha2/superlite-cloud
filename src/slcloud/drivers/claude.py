@@ -3,18 +3,35 @@ from __future__ import annotations
 
 import json
 
+from slcloud.adapters import CLAUDE_ISOLATION
 from slcloud.drivers.base import Driver, _json
 
 _TARGETS = ("file_path", "path", "command", "pattern", "url", "query")
+NO_WORKTREE_TOOLS = ("EnterWorktree", "ExitWorktree")
+
+
+def headless_note(slug: str | None) -> str:
+    """System-prompt note: keep superlite in /work, where the worker opened its session and hands back from."""
+    session = f"`{slug}`" if slug else "the one already open in /work"
+    return ("This is a headless superlite-cloud run inside a sandbox; nobody can answer questions mid-run. "
+            f"The superlite session for this run is already open in /work on its branch: its slug is {session}. "
+            "Build everything in /work on that branch. Never create, enter or switch to a git worktree or "
+            "another session (no `session create`, no `--worktree`), because only /work is handed back. "
+            f"Whenever superlite asks you to ensure or create a session, run `session ensure --slug {slug or '<that slug>'}`"
+            " in /work instead. Leave your changes in /work; the run commits and hands them back.")
 
 
 class ClaudeDriver(Driver):
     name = "claude"
 
     def argv(self, prompt: str) -> list[str]:
-        argv = ["claude", "-p", "--bare", "--plugin-dir", "/opt/superlite",
+        # Same isolation as ClaudeAdapter (see adapters.CLAUDE_ISOLATION and SECURITY.md).
+        argv = ["claude", "-p", *CLAUDE_ISOLATION,
                 "--input-format", "stream-json", "--output-format", "stream-json",
-                "--verbose", "--permission-mode", "acceptEdits"]
+                "--verbose", "--permission-mode", "bypassPermissions",
+                # Hand-back commits /work only: work done in a worktree would be lost.
+                "--disallowedTools", *NO_WORKTREE_TOOLS,
+                "--append-system-prompt", headless_note(self.slug)]
         if self.session:
             argv += ["--resume", self.session]
         return argv

@@ -189,8 +189,8 @@ def test_nudge_delivered(env):
 def test_driver_fail_watch_only(env, monkeypatch):
     real = worker.get_driver
 
-    def broken(agent, start, session=None):
-        d = real(agent, start, session)
+    def broken(agent, start, session=None, slug=None):
+        d = real(agent, start, session, slug=slug)
 
         def boom(text):
             raise RuntimeError("no steer")
@@ -398,7 +398,7 @@ def test_cursor_queued_nudge_resumes_through_worker(env, monkeypatch):
         box["argvs"].append(argv)
         return _TurnProc(next(turns))
 
-    def fake_get_driver(agent, _start, session=None):
+    def fake_get_driver(agent, _start, session=None, slug=None):
         driver.append(CursorDriver(start, session))
         return driver[0]
 
@@ -430,7 +430,7 @@ def test_failed_handshake_kills_sandbox(env, monkeypatch):
         def stop(self):
             self.stopped = True
 
-    monkeypatch.setattr(worker, "get_driver", lambda agent, start, session=None: Boom())
+    monkeypatch.setattr(worker, "get_driver", lambda agent, start, session=None, slug=None: Boom())
     t = submit(env, "go")
     r = worker.run_task(t, env.deps)
     assert r.status == "failed" and "no response" in r.error

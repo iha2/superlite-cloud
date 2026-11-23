@@ -23,9 +23,11 @@ class Driver:
     name = ""
     supports_nudge = True
 
-    def __init__(self, start: Callable[[list[str]], Proc], session: str | None = None) -> None:
+    def __init__(self, start: Callable[[list[str]], Proc], session: str | None = None,
+                 slug: str | None = None) -> None:
         self._start = start
         self.session = session
+        self.slug = slug  # the superlite session the worker opened in /work for this run
         self.proc: Proc | None = None
         self.stopped = False
         self._text: str | None = None
