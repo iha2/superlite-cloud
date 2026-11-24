@@ -24,8 +24,9 @@ class Driver:
     supports_nudge = True
 
     def __init__(self, start: Callable[[list[str]], Proc], session: str | None = None,
-                 slug: str | None = None) -> None:
+                 slug: str | None = None, workdir: str = "/work") -> None:
         self._start = start
+        self.workdir = workdir  # where the agent runs: /work in a container, the run dir under `process`
         self.session = session
         self.slug = slug  # the superlite session the worker opened in /work for this run
         self.proc: Proc | None = None

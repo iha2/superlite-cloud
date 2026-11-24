@@ -86,6 +86,12 @@ class _Sandbox:
         self.deps, self.run_dir, self.env = deps, run_dir, env
         self.mounts = [Mount(cache.path, cache.path, True)]
 
+    @property
+    def workdir(self) -> str:
+        """Where the agent sees the checkout: /work in a container, the run dir under `process`."""
+        for_ = getattr(self.deps.runner, "workdir_for", None)
+        return for_(self.run_dir) if for_ else "/work"
+
     def job(self, command: list[str], env: dict[str, str] | None = None) -> Job:
         return Job(self.deps.settings.worker_image, command, {**self.env, **(env or {})},
                    self.run_dir, mounts=list(self.mounts))
@@ -206,7 +212,8 @@ def _run_task(task, deps: Deps, run_dir: str):
         if _cancelled(task, deps):
             return _gone(task, deps)
         cap = Capture(task.id, eng.add_live_event, secrets, deps.clock)
-        driver = get_driver(task.agent, sb.start, session, slug=names.slug(task.name))
+        driver = get_driver(task.agent, sb.start, session, slug=names.slug(task.name),
+                            workdir=sb.workdir)
         try:
             driver.start(prompt)
         except BaseException:

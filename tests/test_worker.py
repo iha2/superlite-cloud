@@ -189,8 +189,8 @@ def test_nudge_delivered(env):
 def test_driver_fail_watch_only(env, monkeypatch):
     real = worker.get_driver
 
-    def broken(agent, start, session=None, slug=None):
-        d = real(agent, start, session, slug=slug)
+    def broken(agent, start, session=None, slug=None, workdir="/work"):
+        d = real(agent, start, session, slug=slug, workdir=workdir)
 
         def boom(text):
             raise RuntimeError("no steer")
@@ -398,7 +398,7 @@ def test_cursor_queued_nudge_resumes_through_worker(env, monkeypatch):
         box["argvs"].append(argv)
         return _TurnProc(next(turns))
 
-    def fake_get_driver(agent, _start, session=None, slug=None):
+    def fake_get_driver(agent, _start, session=None, slug=None, workdir="/work"):
         driver.append(CursorDriver(start, session))
         return driver[0]
 
@@ -430,8 +430,29 @@ def test_failed_handshake_kills_sandbox(env, monkeypatch):
         def stop(self):
             self.stopped = True
 
-    monkeypatch.setattr(worker, "get_driver", lambda agent, start, session=None, slug=None: Boom())
+    monkeypatch.setattr(worker, "get_driver", lambda agent, start, session=None, slug=None, workdir="/work": Boom())
     t = submit(env, "go")
     r = worker.run_task(t, env.deps)
     assert r.status == "failed" and "no response" in r.error
     assert procs[0].killed
+
+
+def test_process_run_note_names_actual_workdir(env):
+    """Regression: the headless note hard-coded /work, but the process runner runs Claude in the run dir."""
+    t = submit(env, "Fix the login redirect")
+    r = worker.run_task(t, env.deps)
+    assert r.status == "done", r.error
+    run_dir = os.path.join(env.deps.settings.work_dir, t.id)
+    argv = json.loads(open(env.tmp / "claude.log").readline())
+    note = argv[argv.index("--append-system-prompt") + 1]
+    assert f"already open in {run_dir} on its branch" in note
+    assert "in /work " not in note and "only /work " not in note
+
+
+def test_sandbox_workdir_per_runner(env):
+    from slcloud.sandbox import DockerRunner
+    cache = SimpleNamespace(path="/c")
+    sb = worker._Sandbox(None, env.deps, "/data/work/t1", cache, {})
+    assert sb.workdir == "/data/work/t1"  # process runner
+    sb.deps = SimpleNamespace(runner=DockerRunner(), settings=env.deps.settings)
+    assert sb.workdir == "/work"

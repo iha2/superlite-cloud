@@ -124,11 +124,22 @@ def _spawn(popen, argv, **kw):
 
 
 class ProcessRunner:
-    """Runs a job as a local process with a minimal environment."""
+    """Runs a job as a local process with a minimal environment. Dev and test only: there is no
+    container boundary, so the agent runs on the host with whatever permissions it is given."""
+
+    def workdir_for(self, workdir: str) -> str:
+        return workdir  # the agent runs right in the run directory; there is no /work
+
+    def _env(self, job: Job) -> dict[str, str]:
+        # HOME is a per-run dir beside the checkout, never the checkout itself: an agent reading
+        # "user" settings from $HOME/.claude must not be reading the untrusted repo's files.
+        root = state_root(job.workdir)
+        _safe_dir(os.path.dirname(root))
+        _safe_dir(root)
+        return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": root, **job.env}
 
     def run(self, job: Job) -> JobResult:
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-               "HOME": job.workdir, **job.env}
+        env = self._env(job)
         try:
             p = subprocess.run(job.command, cwd=job.workdir, env=env, capture_output=True,
                                text=True, timeout=job.timeout_s)
@@ -138,8 +149,7 @@ class ProcessRunner:
 
 
     def start(self, job: Job, popen=subprocess.Popen) -> Proc:
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-               "HOME": job.workdir, **job.env}
+        env = self._env(job)
         return Proc(_spawn(popen, job.command, cwd=job.workdir, env=env), job.timeout_s)
 
 
@@ -149,6 +159,9 @@ _DOCKER_PASSTHROUGH = ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
 
 
 class DockerRunner:
+    def workdir_for(self, workdir: str) -> str:
+        return "/work"  # the checkout is mounted at /work
+
     def __init__(self, gvisor: bool = False, run=subprocess.run, docker_bin: str | None = None,
                  popen=subprocess.Popen):
         self.gvisor = gvisor

@@ -163,3 +163,10 @@ def test_other_agents_resolve(agent):
     except (ImportError, NotImplementedError):
         pytest.skip("owned by T20/T8")
     assert d.session == "c_1"
+
+
+def test_claude_driver_note_uses_given_workdir():
+    note = get_driver("claude", lambda a: FakeProc(), None, slug="s", workdir="/data/work/t1").argv("x")[-1]
+    assert "open in /data/work/t1 on its branch" in note and "/work" not in note.replace("/data/work", "")
+    default = get_driver("claude", lambda a: FakeProc(), None, slug="s").argv("x")
+    assert "open in /work on its branch" in default[default.index("--append-system-prompt") + 1]
