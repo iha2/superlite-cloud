@@ -12,18 +12,18 @@ def job(**kw):
     return Job(**base)
 
 
-def test_process_run():
-    r = ProcessRunner().run(Job("x", ["sh", "-c", "echo hi"], {}, "/tmp"))
+def test_process_run(tmp_path):
+    r = ProcessRunner().run(Job("x", ["sh", "-c", "echo hi"], {}, str(tmp_path)))
     assert r == JobResult(code=0, stdout="hi\n", stderr="", timed_out=False)
 
 
-def test_timeout():
-    r = ProcessRunner().run(Job("x", ["sleep", "5"], {}, "/tmp", timeout_s=1))
+def test_timeout(tmp_path):
+    r = ProcessRunner().run(Job("x", ["sleep", "5"], {}, str(tmp_path), timeout_s=1))
     assert r.timed_out is True and r.code == -1
 
 
-def test_process_env_minimal():
-    r = ProcessRunner().run(Job("x", ["env"], {"FOO": "bar"}, "/tmp"))
+def test_process_env_minimal(tmp_path):
+    r = ProcessRunner().run(Job("x", ["env"], {"FOO": "bar"}, str(tmp_path)))
     names = {l.split("=", 1)[0] for l in r.stdout.splitlines() if "=" in l}
     assert {"PATH", "HOME", "FOO"} <= names
     assert names <= {"PATH", "HOME", "FOO", "PWD", "SHLVL", "_", "OLDPWD"}
@@ -216,9 +216,9 @@ def test_env_not_in_argv():
     assert kw["env"]["ANTHROPIC_API_KEY"] == "sekret"
 
 
-def test_process_start_roundtrip():
+def test_process_start_roundtrip(tmp_path):
     p = ProcessRunner().start(Job("x", [sys.executable, "-c",
-                              "import sys;[print(l.upper(),end='') for l in sys.stdin]"], {}, "/tmp"))
+                              "import sys;[print(l.upper(),end='') for l in sys.stdin]"], {}, str(tmp_path)))
     p.write("hi\n")
     p.close_stdin()
     assert list(p.lines()) == ["HI"]
@@ -288,3 +288,17 @@ def test_agent_state_removed_with_run(tmp_path):
 def test_no_agent_state_without_checkout(tmp_path):
     argv = DockerRunner(docker_bin="docker").argv(job(workdir=str(tmp_path)))
     assert not any("slcloud-agent" in a for a in argv)
+
+
+def test_process_home_is_not_the_checkout(tmp_path):
+    """Regression: HOME=workdir made `--setting-sources user` read the untrusted repo's own .claude files."""
+    from slcloud.sandbox import state_root
+    wd = tmp_path / "work" / "t1"
+    wd.mkdir(parents=True)
+    r = ProcessRunner().run(Job("x", ["sh", "-c", "echo $HOME"], {}, str(wd)))
+    home = r.stdout.strip()
+    assert home == state_root(str(wd)) and os.path.isdir(home)
+    assert home != str(wd) and not home.startswith(str(wd) + os.sep)
+    p = ProcessRunner().start(Job("x", ["sh", "-c", "echo $HOME"], {}, str(wd)))
+    assert next(p.lines()) == home
+    p.wait()

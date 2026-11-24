@@ -163,7 +163,7 @@ Set these in `.env`. Provider keys are never set here: store them with `slcloud 
 | `SLCLOUD_URL` | `http://localhost:8787` | The public URL agents and browsers use |
 | `SLCLOUD_DOMAIN` | empty | Host name for the optional https profile (Caddy) |
 | `SLCLOUD_WORK` | `/srv/slcloud/work` | Task workdir root, the same path on the host and in the worker |
-| `SLCLOUD_SANDBOX` | `docker` | `docker`, or `process` to run without containers |
+| `SLCLOUD_SANDBOX` | `docker` | `docker`, or `process` to run agents on the host with no container (dev and test only, see SECURITY.md) |
 | `SLCLOUD_GVISOR` | `0` | `1` runs sandboxes under gVisor (`runsc`) if it is installed |
 | `SLCLOUD_DOCKER_BIN` | `docker` | The container CLI for sandboxes: `docker` or `podman` |
 | `SLCLOUD_WORKER_IMAGE` | `slcloud-worker:0.1.0` | The sandbox image |

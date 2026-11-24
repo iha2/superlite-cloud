@@ -9,12 +9,26 @@ PLAN = "Plan ready. Reply approve to start"
 
 def test_claude_command():
     assert get_adapter("claude").command("go", None) == [
-        "claude", "-p", "--bare", "--plugin-dir", "/opt/superlite",
+        "claude", "-p", "--setting-sources", "user", "--strict-mcp-config",
+        "--plugin-dir", "/opt/superlite",
         "--output-format", "stream-json", "--verbose",
-        "--permission-mode", "acceptEdits", "go"]
+        "--permission-mode", "bypassPermissions", "go"]
     c = get_adapter("claude").command("go", "s1")
     assert c[-3:] == ["--resume", "s1", "go"]
-    assert "--bare" in c
+
+
+@pytest.mark.parametrize("resume", [None, "s1"])
+def test_claude_command_isolation(resume):
+    """Regression: superlite needs hooks and skills (no --bare, no acceptEdits), and the repo's own
+    settings hooks and .mcp.json must never load (user settings only, strict MCP)."""
+    c = get_adapter("claude").command("go", resume)
+    assert "--bare" not in c and "acceptEdits" not in c
+    assert c[c.index("--setting-sources") + 1] == "user"
+    assert "--strict-mcp-config" in c and "--mcp-config" not in c
+    assert c[c.index("--permission-mode") + 1] == "bypassPermissions"
+    assert get_adapter("claude").env == {"IS_SANDBOX": "1", "SUPERLITE_NO_AUTOCOMPACT": "1"}
+    for other in ("codex", "gemini", "cursor"):
+        assert get_adapter(other).env == {}
 
 
 def test_claude_parse_plan():

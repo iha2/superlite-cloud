@@ -3,18 +3,36 @@ from __future__ import annotations
 
 import json
 
+from slcloud.adapters import CLAUDE_ISOLATION
 from slcloud.drivers.base import Driver, _json
 
 _TARGETS = ("file_path", "path", "command", "pattern", "url", "query")
+NO_WORKTREE_TOOLS = ("EnterWorktree", "ExitWorktree")
+
+
+def headless_note(slug: str | None, workdir: str = "/work") -> str:
+    """System-prompt note: keep superlite in the run's working directory, where the worker opened its
+    session and hands back from (/work in a container, the run directory under the process runner)."""
+    session = f"`{slug}`" if slug else f"the one already open in {workdir}"
+    return ("This is a headless superlite-cloud run inside a sandbox; nobody can answer questions mid-run. "
+            f"The superlite session for this run is already open in {workdir} on its branch: its slug is {session}. "
+            f"Build everything in {workdir} on that branch. Never create, enter or switch to a git worktree or "
+            f"another session (no `session create`, no `--worktree`), because only {workdir} is handed back. "
+            f"Whenever superlite asks you to ensure or create a session, run `session ensure --slug {slug or '<that slug>'}`"
+            f" in {workdir} instead. Leave your changes in {workdir}; the run commits and hands them back.")
 
 
 class ClaudeDriver(Driver):
     name = "claude"
 
     def argv(self, prompt: str) -> list[str]:
-        argv = ["claude", "-p", "--bare", "--plugin-dir", "/opt/superlite",
+        # Same isolation as ClaudeAdapter (see adapters.CLAUDE_ISOLATION and SECURITY.md).
+        argv = ["claude", "-p", *CLAUDE_ISOLATION,
                 "--input-format", "stream-json", "--output-format", "stream-json",
-                "--verbose", "--permission-mode", "acceptEdits"]
+                "--verbose", "--permission-mode", "bypassPermissions",
+                # Hand-back commits the run's working directory only: work done in a worktree would be lost.
+                "--disallowedTools", *NO_WORKTREE_TOOLS,
+                "--append-system-prompt", headless_note(self.slug, self.workdir)]
         if self.session:
             argv += ["--resume", self.session]
         return argv

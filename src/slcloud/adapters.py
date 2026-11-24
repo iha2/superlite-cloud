@@ -63,11 +63,17 @@ def _whole(stdout: str) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
+# Shared by ClaudeAdapter and drivers.claude.ClaudeDriver (the live path): load only user settings and
+# slcloud's MCP config, never the cloned repo's hooks or .mcp.json, plus the superlite plugin.
+CLAUDE_ISOLATION = ("--setting-sources", "user", "--strict-mcp-config", "--plugin-dir", "/opt/superlite")
+
+
 class AgentAdapter:
     name = ""
     provider = ""
     key_env = ""
     supports_resume = False
+    env: dict[str, str] = {}  # fixed, non-secret env the agent needs in its sandbox
 
     def command(self, prompt: str, resume: str | None) -> list[str]:
         if resume and not self.supports_resume:
@@ -83,11 +89,17 @@ class AgentAdapter:
 
 class ClaudeAdapter(AgentAdapter):
     name, provider, key_env, supports_resume = "claude", "anthropic", "ANTHROPIC_API_KEY", True
+    # The sandbox runs as root; Claude allows bypassPermissions as root only with IS_SANDBOX=1.
+    # Headless runs cannot /compact, so superlite's compact nudge is off.
+    env = {"IS_SANDBOX": "1", "SUPERLITE_NO_AUTOCOMPACT": "1"}
 
     def _command(self, prompt, resume):
-        argv = ["claude", "-p", "--bare", "--plugin-dir", "/opt/superlite",
-                "--output-format", "stream-json", "--verbose",
-                "--permission-mode", "acceptEdits"]
+        # No --bare: superlite needs its hooks and the Skill and Task tools. The cloned repo is untrusted,
+        # so only user settings load (never the repo's .claude/settings.json hooks) and only slcloud's MCP
+        # config (none), never the repo's .mcp.json. Nobody can approve a prompt in a headless run, and
+        # the sandbox container is the boundary, so permissions are bypassed.
+        argv = ["claude", "-p", *CLAUDE_ISOLATION, "--output-format", "stream-json", "--verbose",
+                "--permission-mode", "bypassPermissions"]
         if resume:
             argv += ["--resume", resume]
         return argv + _pos(prompt)

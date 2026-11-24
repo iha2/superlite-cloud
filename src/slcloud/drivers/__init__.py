@@ -21,8 +21,9 @@ __all__ = ["base", "claude", "codex", "cursor", "gemini", "get_driver",
 _DRIVERS = {"claude": ClaudeDriver, "cursor": CursorDriver, "codex": CodexDriver, "gemini": GeminiDriver}
 
 
-def get_driver(agent: str, start: Callable[[list[str]], Proc], session: str | None = None) -> Driver:
+def get_driver(agent: str, start: Callable[[list[str]], Proc], session: str | None = None,
+               slug: str | None = None, workdir: str = "/work") -> Driver:
     cls = _DRIVERS.get(agent)
     if cls is None:
         raise ValueError(f"unknown agent: {agent}")
-    return cls(start, session)
+    return cls(start, session, slug=slug, workdir=workdir)

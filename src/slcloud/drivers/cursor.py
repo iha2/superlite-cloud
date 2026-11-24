@@ -12,8 +12,9 @@ _TARGETS = ("path", "file_path", "command", "pattern")
 class CursorDriver(Driver):
     name = "cursor"
 
-    def __init__(self, start, session: str | None = None) -> None:
-        super().__init__(start, session)
+    def __init__(self, start, session: str | None = None, slug: str | None = None,
+                 workdir: str = "/work") -> None:
+        super().__init__(start, session, slug, workdir)
         self.queue: list[str] = []
         self._qlock = threading.Lock()
         # Called with the number of queued nudges once the resumed turn has started.
