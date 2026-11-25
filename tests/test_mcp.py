@@ -83,7 +83,8 @@ def make(monkeypatch):
 def test_tool_names(make):
     assert {k for k in make() if not k.startswith("_")} == {
         "submit_task", "get_task", "list_tasks", "respond", "cancel_task", "fetch_command",
-        "team_lessons", "list_runs", "give_run", "status"}
+        "team_lessons", "list_runs", "give_run", "status",
+        "list_files", "read_file", "write_file"}
 
 
 def test_give_run_status_list_runs(make):
