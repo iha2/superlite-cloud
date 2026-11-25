@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import json
 
-from slcloud import auth, learning, runs
+from slcloud import auth, files, filestore, learning, repocache, runs
 from slcloud.errors import BadTransition, NotFound, Rejected
 
 try:  # mcp 1.x
@@ -31,7 +31,7 @@ def tools(engine, store, settings, whoami) -> dict:
                 return {"error": "not found"}
             except runs.NoSuchMember:
                 return {"error": "no such member"}
-            except (BadTransition, Rejected) as e:
+            except (BadTransition, Rejected, files.NotFastForward, ValueError) as e:
                 return {"error": str(e)}
 
         return run
@@ -105,8 +105,49 @@ def tools(engine, store, settings, whoami) -> dict:
         """Approved lessons the team has agreed on."""
         return learning.lessons(store, ws())
 
+    def load(ref):
+        """The waiting run and its published row, or an error dict."""
+        task = runs.get_run(store, whoami(), ref)
+        if task.status != "waiting":
+            return None, None, {"error": f"run is {task.status}, not waiting"}
+        row = filestore.get(store, task.id)
+        if row is None or row["state"] != "ready":
+            return None, None, {"error": "files not published yet"}
+        return task, row, None
+
+    def cache_of(task):
+        return repocache.cache_for(settings.data_dir, task.ws, task.repo)
+
+    @guard
+    def list_files(ref: str):
+        """List the files of a waiting run (edits if any, else the gate commit)."""
+        task, row, err = load(ref)
+        if err:
+            return err
+        sha = row["edits"]["sha"] if row["edits"] else row["sha"]
+        return {"files": files.list_files(cache_of(task), sha)}
+
+    @guard
+    def read_file(ref: str, path: str):
+        """Read one file of a waiting run."""
+        task, row, err = load(ref)
+        if err:
+            return err
+        sha = row["edits"]["sha"] if row["edits"] else row["sha"]
+        return {"path": path, "text": files.read_file(cache_of(task), sha, path)}
+
+    @guard
+    def write_file(ref: str, path: str, text: str):
+        """Write one file of a waiting run as a new commit on top of the edits."""
+        task, row, err = load(ref)
+        if err:
+            return err
+        sha, changed = files.write_file(cache_of(task), task.id, row["sha"], path, text)
+        filestore.set_edits(store, task.id, sha, changed)
+        return {"sha": sha, "files": changed}
+
     fns = (submit_task, get_task, list_tasks, respond, cancel_task, fetch_command, team_lessons,
-           list_runs, give_run, status)
+           list_runs, give_run, status, list_files, read_file, write_file)
     return {f.__name__: f for f in fns}
 
 

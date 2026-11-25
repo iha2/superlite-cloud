@@ -6,12 +6,13 @@ from __future__ import annotations
 import dataclasses
 import os
 import shutil
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from slcloud import gitops, names, repocache
+from slcloud import files, filestore, gitops, names, repocache
 from slcloud.adapters import PLAN_MARKER, get_adapter, redact
 from slcloud.capture import Capture
 from slcloud.drivers import get_driver
@@ -39,6 +40,74 @@ class Deps:
     poll: float = 0.5
     cli: list[str] = field(default_factory=lambda: [
         "bash", "/opt/superlite/skills/swarm/scripts/superlite-cli"])
+
+
+def answer_for(answer: str, edited: list[str]) -> str:
+    if not edited:
+        return answer
+    return (f"{answer}\n\nBefore approving, the user edited these files on the branch: "
+            f"{', '.join(edited)}. Reread them before you build.")
+
+
+def _is_plan(path: str) -> bool:
+    return path.startswith("docs/plans/") and path.endswith(".md")
+
+
+def _base_sha(cache, base: str, gate: str) -> str:
+    p = subprocess.run(["git", "-C", cache.path, "merge-base", base, gate],
+                       capture_output=True, text=True, timeout=60)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def _pub_ref(task_id: str) -> str:
+    return f"refs/published/{task_id}"
+
+
+def _published(cache, task_id: str) -> str:
+    """The sha an earlier publish pushed for this task (survives the row clear on resume)."""
+    p = subprocess.run(["git", "-C", cache.path, "rev-parse", "--verify", "-q", _pub_ref(task_id)],
+                       capture_output=True, text=True, timeout=60)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def _gate(task, deps: Deps, cache, sb, branch: str) -> None:
+    """Commit the checkout, copy it into the cache as the gate ref and record the plans."""
+    sb.sh(["sh", "-c", _COMMIT], {**_GIT_ENV, "SL_MSG": "superlite: plan gate"})
+    with cache.lock():
+        sha = cache.fetch_from(sb.run_dir, branch, into=files.gate_ref(task.id))
+        base = _base_sha(cache, task.base, sha)
+        names_ = files.changed(cache, base, sha) if base else []
+    plans = [p for p in names_ if _is_plan(p)]
+    filestore.set_gate_sha(deps.engine.store, task.id, sha, plans)
+    deps.engine.add_live_event(task.id, "plan", {"plans": plans})
+
+
+def publish_pending(deps: Deps) -> bool:
+    """Serve publish requests: push each gate to origin, else keep a bundle."""
+    eng, st = deps.engine, deps.settings
+    done = False
+    for tid in filestore.pending(eng.store):
+        try:
+            task = eng._load(tid)
+            row = filestore.get(eng.store, tid) or {}
+            cache = repocache.cache_for(st.data_dir, task.ws, task.repo)
+            branch = "superlite/sessions/" + names.slug(task.name)
+            gref, bundle = files.gate_ref(tid), ""
+            with cache.lock():
+                sha = row.get("sha") or cache.fetch_from(
+                    os.path.join(st.work_dir, tid), branch, into=gref)
+                pushed = cache.push(gref, branch, expect=_published(cache, tid))
+                if pushed:
+                    subprocess.run(["git", "-C", cache.path, "update-ref", _pub_ref(tid), sha],
+                                   capture_output=True, timeout=60, check=True)
+                if not pushed:
+                    bundle = cache.bundle(gref, os.path.join(st.data_dir, "bundles", f"{tid}.gate.bundle"))
+            filestore.set_gate(eng.store, tid, branch, sha, pushed, row.get("plans") or [], bundle)
+            eng.add_live_event(tid, "published", {"branch": branch, "sha": sha, "pushed": pushed})
+            done = True
+        except Exception:  # noqa: BLE001 - one bad request must not stop the loop
+            continue
+    return done
 
 
 def _cancelled(task, deps: Deps) -> bool:
@@ -196,8 +265,20 @@ def _run_task(task, deps: Deps, run_dir: str):
             return _fail(task, deps, "invalid base")  # never let a base act as a git option
         state = {"name": task.name}
         resuming = bool(task.session and task.answer) and os.path.isdir(run_dir)
+        pushed_gate = bool(_published(cache, task.id)) if resuming else False
         if resuming:
             prompt, session = task.answer, task.session
+            row = filestore.get(eng.store, task.id)
+            if row:
+                pushed_gate = bool(row["pushed"])
+                edited: list[str] = []
+                if row["edits"]:
+                    sb.sh(["git", "fetch", "-q", cache.path, files.edits_ref(task.id)])
+                    sb.sh(["git", "merge", "--ff-only", "-q", "FETCH_HEAD"])
+                    edited = list(row["edits"]["files"])
+                prompt = answer_for(task.answer, edited)
+                files.drop_refs(cache, task.id)
+                filestore.clear(eng.store, task.id)
         else:
             prompt, session = task.prompt, None
             shutil.rmtree(run_dir, ignore_errors=True)
@@ -256,6 +337,7 @@ def _run_task(task, deps: Deps, run_dir: str):
         final = mask(res.text or res.plan or "", secrets)
         if res.plan or PLAN_MARK in (res.text or ""):
             eng.add_live_event(task.id, "result", {"text": final})
+            _gate(task, deps, cache, sb, "superlite/sessions/" + names.slug(state["name"]))
             return eng.transition(task.id, "waiting", session=driver.session or res.session,
                                   plan=mask(res.plan or res.text, secrets))
 
@@ -274,7 +356,8 @@ def _run_task(task, deps: Deps, run_dir: str):
 
         if _cancelled(task, deps):
             return _gone(task, deps)
-        hb = gitops.safe_hand_back(cache, run_dir, task.name, task.id, set(), rename, commit, log,
+        hb = gitops.safe_hand_back(cache, run_dir, task.name, task.id,
+                                   {task.name} if pushed_gate else set(), rename, commit, log,
                                    os.path.join(st.data_dir, "bundles"),
                                    live=lambda: eng.live_names(task.id))
         eng.add_live_event(task.id, "handback", {"text": f"handed back on {hb.branch}"})
@@ -298,6 +381,11 @@ def _cleanup(deps: Deps) -> None:
 
 
 def loop_once(deps: Deps) -> bool:
+    try:
+        if publish_pending(deps):
+            return True
+    except Exception:  # noqa: BLE001 - never kill the loop
+        pass
     task = deps.engine.claim()
     if task is None:
         return False

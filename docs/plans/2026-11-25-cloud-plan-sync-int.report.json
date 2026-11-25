@@ -1,0 +1,235 @@
+{
+ "projection_note": "projection: fixed forecast saved at lint 2026-11-25T17:56:08",
+ "headline": {
+  "wall_min": {
+   "projected": 18.807,
+   "actual": 18.827
+  },
+  "cost_usd_agents": {
+   "projected": 0.858914,
+   "actual": 1.529367
+  },
+  "task_min": {
+   "projected": 37.614,
+   "actual": 22.145
+  },
+  "agents": {
+   "projected": 6,
+   "actual": 10
+  }
+ },
+ "feature": null,
+ "cost_split": {
+  "agents_usd": 1.482233,
+  "rework_usd": 0.047134,
+  "coordinator_usd": 25.244324,
+  "total_usd": 26.773691
+ },
+ "concurrency": {
+  "peak": 2,
+  "projected_peak": 3
+ },
+ "critical_path": {
+  "actual": [
+   "T2",
+   "T3"
+  ],
+  "projected": [
+   "T1",
+   "T3",
+   "T6"
+  ],
+  "projected_min": 18.807
+ },
+ "model_mix": {
+  "sonnet": {
+   "tasks": 5,
+   "cost_usd": 1.4822330000000001
+  },
+  "unknown": {
+   "tasks": 1,
+   "cost_usd": 0.047134
+  }
+ },
+ "coordinator_cost_by_model": {
+  "opus": 25.244324
+ },
+ "quality": {
+  "tests": {
+   "passed": 10,
+   "failed": 0,
+   "skipped": 0,
+   "seconds": 26.0,
+   "mode": "affected",
+   "failures": [],
+   "skipped_tests": [],
+   "selected": [
+    "tests/test_plan_sync_e2e.py"
+   ],
+   "reason": "changed",
+   "changed_count": 1,
+   "untested": [],
+   "tree": "970917538b78ecbe",
+   "run_id": "20261125T182044-11034-d785cf",
+   "superlite_run": "20261125-174650-cloud-plan-sync-int"
+  },
+  "first_time_pass": 0,
+  "first_time_n": 0,
+  "rework_dispatches": 1,
+  "open_incidents": 28
+ },
+ "tasks": [
+  {
+   "task": "T5",
+   "model": null,
+   "pred_min": 6.269,
+   "actual_min": 0.0,
+   "delta": {
+    "abs": -6.269,
+    "pct": -100.0
+   },
+   "cost_usd": 0.047134,
+   "first_time_pass": null
+  },
+  {
+   "task": "T1",
+   "model": "sonnet",
+   "pred_min": 6.269,
+   "actual_min": 0.93,
+   "delta": {
+    "abs": -5.339,
+    "pct": -85.2
+   },
+   "cost_usd": 0.083316,
+   "first_time_pass": null
+  },
+  {
+   "task": "T3",
+   "model": "sonnet",
+   "pred_min": 6.269,
+   "actual_min": 10.93,
+   "delta": {
+    "abs": 4.661,
+    "pct": 74.3
+   },
+   "cost_usd": 0.504885,
+   "first_time_pass": null
+  },
+  {
+   "task": "T4",
+   "model": "sonnet",
+   "pred_min": 6.269,
+   "actual_min": 3.055,
+   "delta": {
+    "abs": -3.214,
+    "pct": -51.3
+   },
+   "cost_usd": 0.396684,
+   "first_time_pass": null
+  },
+  {
+   "task": "T6",
+   "model": "sonnet",
+   "pred_min": 6.269,
+   "actual_min": 3.335,
+   "delta": {
+    "abs": -2.934,
+    "pct": -46.8
+   },
+   "cost_usd": 0.288386,
+   "first_time_pass": null
+  },
+  {
+   "task": "T2",
+   "model": "sonnet",
+   "pred_min": 6.269,
+   "actual_min": 3.895,
+   "delta": {
+    "abs": -2.374,
+    "pct": -37.9
+   },
+   "cost_usd": 0.208962,
+   "first_time_pass": null
+  }
+ ],
+ "trend": "trend (last 2 runs): first-time pass n/a -> n/a; findings 4 -> 6; rework+fixer cost 0% -> 3%",
+ "lessons": "lessons: 14 cached, 0 proven",
+ "cost_table": {
+  "source": "est",
+  "usd": 1.7872,
+  "tokens": 3797048,
+  "wall_min": 59854955.0741,
+  "rows": [
+   {
+    "agent": "a03988f3b613f7361",
+    "model": "sonnet",
+    "wall_min": 0.374,
+    "tokens": 71079,
+    "usd": 0.0471
+   },
+   {
+    "agent": "a03b7c4ada331fa66",
+    "model": "sonnet",
+    "wall_min": 0.9227,
+    "tokens": 158508,
+    "usd": 0.0939
+   },
+   {
+    "agent": "a1c2b72f033d56126",
+    "model": "sonnet",
+    "wall_min": 5.8953,
+    "tokens": 771538,
+    "usd": 0.3426
+   },
+   {
+    "agent": "a2122ec63d919b9b5",
+    "model": "sonnet",
+    "wall_min": 29927458.6385,
+    "tokens": 0,
+    "usd": 0.0
+   },
+   {
+    "agent": "a228e2f1edccf7572",
+    "model": "opus",
+    "wall_min": 0.5581,
+    "tokens": 28569,
+    "usd": 0.1639
+   },
+   {
+    "agent": "a3ad0e9cf55f54168",
+    "model": "sonnet",
+    "wall_min": 5.0772,
+    "tokens": 385089,
+    "usd": 0.1623
+   },
+   {
+    "agent": "a49c5cba72eaf56f5",
+    "model": "sonnet",
+    "wall_min": 3.9269,
+    "tokens": 453679,
+    "usd": 0.209
+   },
+   {
+    "agent": "a88ec6db3bb53ad81",
+    "model": "sonnet",
+    "wall_min": 0.9615,
+    "tokens": 127435,
+    "usd": 0.0833
+   },
+   {
+    "agent": "abac7909dad48afbd",
+    "model": "sonnet",
+    "wall_min": 10.1411,
+    "tokens": 1801151,
+    "usd": 0.6851
+   },
+   {
+    "agent": "af1fa02eb1b9e9f8d",
+    "model": "sonnet",
+    "wall_min": 29927468.5788,
+    "tokens": 0,
+    "usd": 0.0
+   }
+  ]
+ }
+}
