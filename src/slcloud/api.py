@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from . import learning, members, runs
 from .config import Settings
+from .files_api import make_files_router
 from .errors import BadTransition, Forbidden, HandleTaken, NotFound, Rejected
 from .store import Store
 from .stream import make_router
@@ -19,6 +20,8 @@ from .stream import make_router
 def create_app(settings: Settings, store: Store, engine, whoami) -> FastAPI:
     app = FastAPI(title="slcloud")
     app.include_router(make_router(store, engine, whoami))
+    # before the greedy /api/tasks/{ref:path} and /bundle routes below
+    app.include_router(make_files_router(store, engine, whoami, settings))
 
     def err(status: int, msg: str) -> JSONResponse:
         return JSONResponse({"error": msg}, status_code=status)

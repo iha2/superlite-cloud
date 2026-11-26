@@ -8,11 +8,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
-# pyproject depends on superlite via a git URL, so pip needs git at install time.
+# pyproject depends on superlite via a git URL, so pip needs git at install time. git stays in
+# the image: the files routes shell out to it at runtime.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git \
  && pip install --no-cache-dir . \
- && apt-get purge -y --auto-remove git \
  && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 8787

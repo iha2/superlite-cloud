@@ -18,3 +18,6 @@ build/
 dist/
 *.db
 work/
+
+# superlite: dependency, build and cache folders
+.superlite/sandboxes/
