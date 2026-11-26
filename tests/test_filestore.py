@@ -64,3 +64,21 @@ def test_schema_has_task_files(tmp_path):
     cols = {r["name"] for r in s.query("PRAGMA table_info(task_files)")}
     assert {"task_id", "state", "branch", "sha", "pushed", "bundle", "plans",
             "edits_sha", "edits_files", "updated"} <= cols
+
+
+def test_require_waiting_reads_fresh_status(tmp_path):
+    import pytest
+    from slcloud import filestore, members
+    from slcloud.engine import Engine
+    from slcloud.errors import BadTransition
+    from slcloud.store import Store
+    st = Store(str(tmp_path / "s.db"))
+    eng = Engine(st)
+    pat = members.create_member(st, "w_ab12", "pat", "pat@example.com", "member")
+    t = eng.submit("w_ab12", "https://github.com/acme/app", "x", "claude", "main", owner=pat)
+    eng.transition(t.id, "running")
+    eng.transition(t.id, "waiting")
+    filestore.require_waiting(st, t.id)
+    eng.transition(t.id, "queued")
+    with pytest.raises(BadTransition, match="run is queued, not waiting"):
+        filestore.require_waiting(st, t.id)

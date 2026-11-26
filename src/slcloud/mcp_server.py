@@ -142,8 +142,10 @@ def tools(engine, store, settings, whoami) -> dict:
         task, row, err = load(ref)
         if err:
             return err
-        sha, changed = files.write_file(cache_of(task), task.id, row["sha"], path, text)
-        filestore.set_edits(store, task.id, sha, changed)
+        sha, changed = files.write_file(
+            cache_of(task), task.id, row["sha"], path, text,
+            precheck=lambda: filestore.require_waiting(store, task.id),
+            record=lambda s, names: filestore.set_edits(store, task.id, s, names))
         return {"sha": sha, "files": changed}
 
     fns = (submit_task, get_task, list_tasks, respond, cancel_task, fetch_command, team_lessons,

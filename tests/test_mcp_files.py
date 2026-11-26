@@ -34,10 +34,14 @@ def env(tmp_path, monkeypatch):
             raise NotFound(path)
         return "text"
 
-    def write_file(cache, tid, gate, path, text):
+    def write_file(cache, tid, gate, path, text, precheck=None, record=None):
         calls["write"].append((tid, gate, path, text))
         if path.startswith(".."):
             raise ValueError("bad path")
+        if precheck:
+            precheck()
+        if record:
+            record(EDIT, [path])
         return EDIT, [path]
 
     monkeypatch.setattr(files, "list_files", lambda c, sha: ["README.md", PLAN])
@@ -98,3 +102,16 @@ def test_not_published(env):
     st, eng, t, tools, who, chris, calls, settings = env
     filestore.clear(st, t.id)
     assert tools["list_files"](ref="login_fix") == {"error": "files not published yet"}
+
+
+def test_write_after_approve_error_changes_nothing(env, monkeypatch):
+    st, eng, t, tools, who, chris, calls, settings = env
+    real = files.write_file
+
+    def racing(*a, **kw):
+        eng.transition(t.id, "queued")  # approve lands after load(), before the locked write
+        return real(*a, **kw)
+    monkeypatch.setattr(files, "write_file", racing)
+    assert tools["write_file"](ref="login_fix", path=PLAN, text="x") == {
+        "error": "run is queued, not waiting"}
+    assert filestore.get(st, t.id)["edits"] is None

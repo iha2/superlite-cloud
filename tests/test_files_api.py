@@ -32,16 +32,24 @@ def world(tmp_path, monkeypatch):
         return out
     monkeypatch.setattr(files, "make_bundle", make_bundle)
 
-    def accept_remote(cache, tid, gate, sha):
+    def accept_remote(cache, tid, gate, sha, precheck=None, record=None):
         calls["remote"] = sha
         if sha == GATE:
             raise files.NotFastForward("no new commits")
+        if precheck:
+            precheck()
+        if record:
+            record(sha, [PLAN])
         return sha, [PLAN]
     monkeypatch.setattr(files, "accept_remote", accept_remote)
 
-    def accept_bundle(cache, tid, gate, path):
+    def accept_bundle(cache, tid, gate, path, precheck=None, record=None):
         with open(path, "rb") as f:
             calls["bundle"] = f.read()
+        if precheck:
+            precheck()
+        if record:
+            record(NEW, [PLAN])
         return NEW, [PLAN]
     monkeypatch.setattr(files, "accept_bundle", accept_bundle)
 
@@ -152,3 +160,52 @@ def test_empty_body_400(world):
                     headers={"content-type": "application/octet-stream"})
     assert r.status_code == 400
     assert w["c"].post("/api/tasks/login_fix/files", json={}).status_code == 400
+
+
+def _approve_during_write(w, monkeypatch, name):
+    """Simulate an approve landing after resolve() but before the locked write."""
+    real = getattr(files, name)
+
+    def racing(*a, **kw):
+        w["eng"].transition(w["task"].id, "queued")
+        return real(*a, **kw)
+    monkeypatch.setattr(files, name, racing)
+
+
+def test_upload_after_approve_409_changes_nothing(world, monkeypatch):
+    w = world
+    ready(w)
+    _approve_during_write(w, monkeypatch, "accept_remote")
+    r = w["c"].post("/api/tasks/login_fix/files", json={"sha": NEW})
+    assert r.status_code == 409 and r.json() == {"error": "run is queued, not waiting"}
+    assert filestore.get(w["st"], w["task"].id)["edits"] is None
+
+
+def test_bundle_upload_after_approve_409_changes_nothing(world, monkeypatch):
+    w = world
+    ready(w)
+    _approve_during_write(w, monkeypatch, "accept_bundle")
+    r = w["c"].post(f"/api/tasks/login_fix/files?base={GATE}", content=b"PACK",
+                    headers={"content-type": "application/octet-stream"})
+    assert r.status_code == 409
+    assert filestore.get(w["st"], w["task"].id)["edits"] is None
+
+
+def test_upload_runs_off_the_event_loop(world, monkeypatch):
+    import asyncio
+    w = world
+    ready(w)
+    seen = {}
+    real = files.accept_remote
+
+    def spy(*a, **kw):
+        try:
+            asyncio.get_running_loop()
+            seen["on_loop"] = True
+        except RuntimeError:
+            seen["on_loop"] = False
+        return real(*a, **kw)
+    monkeypatch.setattr(files, "accept_remote", spy)
+    r = w["c"].post("/api/tasks/login_fix/files", json={"sha": NEW})
+    assert r.status_code == 200
+    assert seen["on_loop"] is False

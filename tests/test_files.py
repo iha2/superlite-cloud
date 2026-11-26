@@ -194,3 +194,108 @@ def test_drop_refs_frees_run_ref(setup):
     g("-C", cache.path, "update-ref", "refs/runs/t_1", gate)
     assert g("-C", cache.path, "rev-parse", "refs/runs/t_1") == gate
     files.drop_refs(cache, "t_1")
+
+
+def test_precheck_refusal_leaves_no_ref_or_edits(setup):
+    cache, gate, *_ = setup
+    seen = []
+
+    def precheck():
+        seen.append(1)
+        raise RuntimeError("run is queued, not waiting")
+
+    recorded = []
+    with pytest.raises(RuntimeError, match="not waiting"):
+        files.write_file(cache, "t_1", gate, PLAN, "# x\n", precheck=precheck,
+                         record=lambda s, n: recorded.append(s))
+    assert seen and recorded == []
+    assert not _ref_exists(cache, files.edits_ref("t_1"))
+
+
+def test_failed_record_restores_previous_ref(setup):
+    cache, gate, *_ = setup
+
+    def boom(sha, names):
+        raise RuntimeError("db down")
+
+    with pytest.raises(RuntimeError, match="db down"):
+        files.write_file(cache, "t_1", gate, PLAN, "# first\n", record=boom)
+    assert not _ref_exists(cache, files.edits_ref("t_1"))
+    s1, _ = files.write_file(cache, "t_1", gate, PLAN, "# first\n")
+    with pytest.raises(RuntimeError, match="db down"):
+        files.write_file(cache, "t_1", gate, "docs/plans/o.md", "o\n", record=boom)
+    assert g("-C", cache.path, "rev-parse", files.edits_ref("t_1")) == s1
+
+
+def test_accept_remote_fetches_under_lock(setup, monkeypatch):
+    cache, gate, *_ = setup
+    state = {"held": False, "fetched_held": None}
+    real_lock, real_fetch = cache.lock, cache.fetch
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def lock():
+        with real_lock():
+            state["held"] = True
+            try:
+                yield
+            finally:
+                state["held"] = False
+
+    def fetch():
+        state["fetched_held"] = state["held"]
+        return real_fetch()
+
+    monkeypatch.setattr(cache, "lock", lock)
+    monkeypatch.setattr(cache, "fetch", fetch)
+    with pytest.raises(files.NotFastForward):
+        files.accept_remote(cache, "t_1", gate, gate)
+    assert state["fetched_held"] is True
+
+
+def _mode_commit(setup, mode, path="bin/run.sh", link=None):
+    cache, gate, env, work, tmp = setup
+    full = os.path.join(work, path)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    if link:
+        os.symlink(link, full)
+    else:
+        with open(full, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(full, mode)
+    g("add", ".", cwd=work, env=env)
+    g("commit", "-qm", "m", cwd=work, env=env)
+    g("push", "-q", cache.repo, "main", cwd=work, env=env)
+    cache.fetch()
+    new = g("-C", cache.path, "rev-parse", "main")
+    g("-C", cache.path, "update-ref", files.gate_ref("t_1"), new)
+    return new
+
+
+def test_write_file_keeps_executable_mode(setup):
+    cache, *_ = setup
+    gate = _mode_commit(setup, 0o755)
+    sha, _ = files.write_file(cache, "t_1", gate, "bin/run.sh", "#!/bin/sh\necho hi\n")
+    assert g("-C", cache.path, "ls-tree", sha, "--", "bin/run.sh").split()[0] == "100755"
+    sha2, _ = files.write_file(cache, "t_1", gate, "new.txt", "n\n")
+    assert g("-C", cache.path, "ls-tree", sha2, "--", "new.txt").split()[0] == "100644"
+
+
+def test_write_file_refuses_symlink_and_directory(setup):
+    cache, *_ = setup
+    gate = _mode_commit(setup, 0, path="lnk", link="README.md")
+    with pytest.raises(ValueError, match="not a regular file: lnk"):
+        files.write_file(cache, "t_1", gate, "lnk", "x\n")
+    with pytest.raises(ValueError, match="not a regular file: docs"):
+        files.write_file(cache, "t_1", gate, "docs", "x\n")
+    with pytest.raises(ValueError):
+        files.write_file(cache, "t_1", gate, "README.md/child", "x\n")
+    assert not _ref_exists(cache, files.edits_ref("t_1"))
+
+
+def test_dockerfile_keeps_git():
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    text = open(os.path.join(here, "Dockerfile")).read()
+    assert "purge" not in text or "git" not in text.split("purge", 1)[1].splitlines()[0]
+    assert "apt-get install" in text and "git" in text

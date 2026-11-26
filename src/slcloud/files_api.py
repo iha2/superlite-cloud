@@ -7,6 +7,7 @@ import tempfile
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from . import files, filestore, repocache, runs
 from .errors import BadTransition, NotFound
@@ -101,11 +102,13 @@ def make_files_router(store, engine, whoami, settings) -> APIRouter:
             task = resolve(ref)
             row = ready_row(task)
             cache = cache_of(task)
+            precheck = lambda: filestore.require_waiting(store, task.id)  # noqa: E731
+            record = lambda sha, names: filestore.set_edits(store, task.id, sha, names)  # noqa: E731
             if is_json:
                 sha = jbody.get("sha") if isinstance(jbody, dict) else None
                 if not isinstance(sha, str) or not sha:
                     raise ValueError("sha required")
-                new, changed = files.accept_remote(cache, task.id, row["sha"], sha)
+                new, changed = files.accept_remote(cache, task.id, row["sha"], sha, precheck, record)
             else:
                 base = request.query_params.get("base")
                 if base is not None and base != row["sha"]:
@@ -117,11 +120,11 @@ def make_files_router(store, engine, whoami, settings) -> APIRouter:
                 try:
                     with os.fdopen(fd, "wb") as fh:
                         fh.write(body)
-                    new, changed = files.accept_bundle(cache, task.id, row["sha"], tmp)
+                    new, changed = files.accept_bundle(cache, task.id, row["sha"], tmp,
+                                                    precheck, record)
                 finally:
                     os.unlink(tmp)
-            filestore.set_edits(store, task.id, new, changed)
             return files_body(store, task, cache)
-        return guard(go)
+        return await run_in_threadpool(guard, go)
 
     return router

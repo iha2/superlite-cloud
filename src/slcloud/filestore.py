@@ -2,6 +2,8 @@
 import json
 from datetime import datetime, timezone
 
+from slcloud.errors import BadTransition
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -9,6 +11,21 @@ def _now() -> str:
 def _row(store, task_id):
     rows = store.query("SELECT * FROM task_files WHERE task_id=?", (task_id,))
     return rows[0] if rows else None
+
+
+def require_waiting(store, task_id: str) -> None:
+    """Fresh read of the run status; raise unless it is still waiting."""
+    rows = store.query("SELECT status FROM tasks WHERE id=?", (task_id,))
+    status = rows[0]["status"] if rows else "missing"
+    if status != "waiting":
+        raise BadTransition(f"run is {status}, not waiting")
+
+
+def mark_gated(store, task_id: str) -> None:
+    """Take a stale publish request off the pending list, keeping the edits."""
+    with store._lock:
+        store.exec("UPDATE task_files SET state='gated', updated=? WHERE task_id=? "
+                   "AND state='pending'", (_now(), task_id))
 
 
 def request_publish(store, task_id: str) -> str:

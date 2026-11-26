@@ -167,3 +167,98 @@ def test_second_gate_after_publish_keeps_name(penv):
     assert r.status == "done", r.error
     assert r.result["branch"] == BRANCH and r.result["pushed"] is True
     assert "superlite/sessions/login-fix-2" not in branches(penv.origin)
+
+
+def _sha_of(cache, ref):
+    p = subprocess.run(["git", "-C", cache.path, "rev-parse", "-q", "--verify", ref],
+                       capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def test_resume_merges_recorded_edits_sha(penv):
+    t = gated(penv)
+    cache = cache_of(penv, t)
+    gate = filestore.get(penv.store, t.id)["sha"]
+    s1, c1 = files.write_file(cache, t.id, gate, "README.md", "first\n")
+    filestore.set_edits(penv.store, t.id, s1, c1)
+    files.write_file(cache, t.id, gate, "README.md", "stray second\n")  # ref ahead of the row
+    penv.eng.respond("w1", t.id, "approve")
+    r = worker.run_task(penv.eng.claim(), penv.deps)
+    assert r.status == "done", r.error
+    assert origin_show(penv, f"{r.result['branch']}:README.md") == "first\n"
+
+
+def test_publish_skips_cancelled_run(penv):
+    t = gated(penv)
+    _edit(penv, t)
+    filestore.request_publish(penv.store, t.id)
+    penv.eng.transition(t.id, "cancelled")
+    assert worker.publish_pending(penv.deps) is False
+    assert BRANCH not in branches(penv.origin)
+    assert not [e for e in penv.eng.events(t.id) if e["kind"] == "published"]
+    assert filestore.get(penv.store, t.id) is None
+    assert not _sha_of(cache_of(penv, t), files.edits_ref(t.id))
+
+
+def test_publish_skips_approved_run_keeps_edits(penv):
+    t = gated(penv)
+    _edit(penv, t)
+    filestore.request_publish(penv.store, t.id)
+    penv.eng.respond("w1", t.id, "approve")
+    assert worker.publish_pending(penv.deps) is False
+    assert BRANCH not in branches(penv.origin)
+    assert filestore.pending(penv.store) == []
+    row = filestore.get(penv.store, t.id)
+    assert row["state"] == "gated" and row["edits"]["files"] == ["README.md"]
+    r = worker.run_task(penv.eng.claim(), penv.deps)
+    assert r.status == "done", r.error
+    assert origin_show(penv, f"{r.result['branch']}:README.md") == "edited text\n"
+
+
+def test_publish_requires_waiting_inside_lock(penv, monkeypatch):
+    t = gated(penv)
+    filestore.request_publish(penv.store, t.id)
+    real = worker.filestore.require_waiting
+
+    def approve_then_check(store, tid):
+        penv.eng.respond("w1", tid, "approve")  # approve lands just before the locked section
+        return real(store, tid)
+    monkeypatch.setattr(worker.filestore, "require_waiting", approve_then_check)
+    assert worker.publish_pending(penv.deps) is False
+    assert BRANCH not in branches(penv.origin)
+    assert filestore.get(penv.store, t.id)["state"] != "ready"
+
+
+def test_fresh_path_drops_stale_edits_and_refs(penv):
+    t = gated(penv)
+    _edit(penv, t)
+    cache = cache_of(penv, t)
+    penv.eng.respond("w1", t.id, "approve")
+    import shutil
+    shutil.rmtree(os.path.join(penv.deps.settings.work_dir, t.id))  # checkout is gone
+    r = worker.run_task(penv.eng.claim(), penv.deps)
+    assert r.status in ("done", "waiting"), r.error  # the fake agent re-plans from the prompt
+    row = filestore.get(penv.store, t.id)
+    assert row is None or row["edits"] is None
+    assert not _sha_of(cache, files.edits_ref(t.id))
+    notes = [e["data"]["text"] for e in penv.eng.events(t.id) if e["kind"] == "notice"]
+    assert any("not applied" in n for n in notes)
+
+
+def test_marker_survives_row_not_pushed(penv, monkeypatch):
+    t = gated(penv)
+    cache = cache_of(penv, t)
+    sha = filestore.get(penv.store, t.id)["sha"]
+    subprocess.run(["git", "-C", cache.path, "update-ref", worker._pub_ref(t.id), sha], check=True)
+    filestore.set_gate(penv.store, t.id, BRANCH, sha, False, [PLAN])  # row says not pushed
+    seen = {}
+    real = worker.gitops.safe_hand_back
+
+    def spy(*a, **kw):
+        seen["owned"] = a[4]
+        return real(*a, **kw)
+    monkeypatch.setattr(worker.gitops, "safe_hand_back", spy)
+    penv.eng.respond("w1", t.id, "approve")
+    r = worker.run_task(penv.eng.claim(), penv.deps)
+    assert r.status == "done", r.error
+    assert seen["owned"] == {t.name}

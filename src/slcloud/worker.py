@@ -70,6 +70,12 @@ def _published(cache, task_id: str) -> str:
     return p.stdout.strip() if p.returncode == 0 else ""
 
 
+def _has_run_refs(cache, task_id: str) -> bool:
+    p = subprocess.run(["git", "-C", cache.path, "for-each-ref", "--count=1",
+                        f"refs/runs/{task_id}/"], capture_output=True, text=True, timeout=60)
+    return p.returncode == 0 and bool(p.stdout.strip())
+
+
 def _gate(task, deps: Deps, cache, sb, branch: str) -> None:
     """Commit the checkout, copy it into the cache as the gate ref and record the plans."""
     sb.sh(["sh", "-c", _COMMIT], {**_GIT_ENV, "SL_MSG": "superlite: plan gate"})
@@ -89,11 +95,21 @@ def publish_pending(deps: Deps) -> bool:
     for tid in filestore.pending(eng.store):
         try:
             task = eng._load(tid)
-            row = filestore.get(eng.store, tid) or {}
             cache = repocache.cache_for(st.data_dir, task.ws, task.repo)
+            if task.status != "waiting":
+                # Cancelled, finished or approved since the request: never push a stale gate.
+                if task.status in _TERMINAL:
+                    with cache.lock():
+                        files.drop_refs(cache, tid)
+                        filestore.clear(eng.store, tid)
+                else:
+                    filestore.mark_gated(eng.store, tid)
+                continue
+            row = filestore.get(eng.store, tid) or {}
             branch = "superlite/sessions/" + names.slug(task.name)
             gref, bundle = files.gate_ref(tid), ""
             with cache.lock():
+                filestore.require_waiting(eng.store, tid)
                 sha = row.get("sha") or cache.fetch_from(
                     os.path.join(st.work_dir, tid), branch, into=gref)
                 pushed = cache.push(gref, branch, expect=_published(cache, tid))
@@ -102,7 +118,7 @@ def publish_pending(deps: Deps) -> bool:
                                    capture_output=True, timeout=60, check=True)
                 if not pushed:
                     bundle = cache.bundle(gref, os.path.join(st.data_dir, "bundles", f"{tid}.gate.bundle"))
-            filestore.set_gate(eng.store, tid, branch, sha, pushed, row.get("plans") or [], bundle)
+                filestore.set_gate(eng.store, tid, branch, sha, pushed, row.get("plans") or [], bundle)
             eng.add_live_event(tid, "published", {"branch": branch, "sha": sha, "pushed": pushed})
             done = True
         except Exception:  # noqa: BLE001 - one bad request must not stop the loop
@@ -268,23 +284,32 @@ def _run_task(task, deps: Deps, run_dir: str):
         pushed_gate = bool(_published(cache, task.id)) if resuming else False
         if resuming:
             prompt, session = task.answer, task.session
-            row = filestore.get(eng.store, task.id)
-            if row:
-                pushed_gate = bool(row["pushed"])
-                edited: list[str] = []
-                if row["edits"]:
-                    sb.sh(["git", "fetch", "-q", cache.path, files.edits_ref(task.id)])
-                    sb.sh(["git", "merge", "--ff-only", "-q", "FETCH_HEAD"])
-                    edited = list(row["edits"]["files"])
-                prompt = answer_for(task.answer, edited)
-                files.drop_refs(cache, task.id)
-                filestore.clear(eng.store, task.id)
+            with cache.lock():
+                row = filestore.get(eng.store, task.id)
+                if row:
+                    pushed_gate = pushed_gate or bool(row["pushed"])
+                    edited: list[str] = []
+                    if row["edits"]:
+                        sha = row["edits"]["sha"]
+                        sb.sh(["git", "fetch", "-q", cache.path, files.edits_ref(task.id)])
+                        sb.sh(["git", "merge", "--ff-only", "-q", sha])
+                        edited = list(row["edits"]["files"])
+                    prompt = answer_for(task.answer, edited)
+                    files.drop_refs(cache, task.id)
+                    filestore.clear(eng.store, task.id)
         else:
             prompt, session = task.prompt, None
             shutil.rmtree(run_dir, ignore_errors=True)
             remove_state(run_dir)
             os.makedirs(os.path.dirname(run_dir), exist_ok=True)
             with cache.lock():
+                lost = filestore.get(eng.store, task.id)
+                if lost is not None or _has_run_refs(cache, task.id):
+                    files.drop_refs(cache, task.id)
+                    filestore.clear(eng.store, task.id)
+                    if lost and lost["edits"]:
+                        eng.add_live_event(task.id, "notice", {
+                            "text": "the checkout was gone, so the edits you pushed were not applied"})
                 cache.fetch()
                 cache.light_clone(task.base, run_dir)
             sb.sh([*deps.cli, "session", "create", "--slug", names.slug(task.name),
