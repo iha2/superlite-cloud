@@ -27,31 +27,62 @@ def test_fake_key_masked():
     assert all("zzsecretvalue123" not in str(e) for e in ev) and len(ev) == 2
 
 
-def test_throttle():
+def test_rapid_text_events_all_arrive_in_order():
     c, ev, now = make()
-    for i, txt in enumerate(["a", "b", "c"]):
-        now[0] = i * 0.1
-        c.feed({"kind": "text", "text": txt})
-    assert ev == []
+    c.feed({"kind": "text", "text": "first message"})
+    now[0] = 0.01
+    c.feed({"kind": "text", "text": "second message"})
+    now[0] = 0.02
+    c.feed({"kind": "text", "text": "z" * 500})
     c.flush()
-    assert len(ev) == 1 and ev[0][2]["text"] == "c"
+    texts = [e[2]["text"] for e in ev]
+    assert texts == ["first message", "second message", "z" * 500]
+    assert [e[2]["step"] for e in ev] == [1, 2, 3]
     c.flush()
-    assert len(ev) == 1
+    assert len(ev) == 3
 
 
-def test_throttle_gap_elapsed():
-    c, ev, now = make()
-    c.feed({"kind": "text", "text": "a"})
-    now[0] = 0.3
-    c.feed({"kind": "text", "text": "b"})
-    assert [e[2]["text"] for e in ev] == ["b"]
+def test_lone_text_event_is_emitted_without_flush():
+    c, ev, _ = make()
+    c.feed({"kind": "text", "text": "hello"})
+    assert [e[2]["text"] for e in ev] == ["hello"]
+
+
+def test_long_message_arrives_whole():
+    c, ev, _ = make()
+    c.feed({"kind": "text", "text": "x" * 3000})
+    c.flush()
+    assert len(ev) == 1 and len(ev[0][2]["text"]) == 3000
 
 
 def test_truncate():
     c, ev, _ = make()
-    c.feed({"kind": "text", "text": "x" * 500})
+    c.feed({"kind": "text", "text": "x" * 5000})
     c.flush()
-    assert len(ev[0][2]["text"]) == 200
+    assert len(ev[0][2]["text"]) == 4000
+
+
+def test_thinking_event_is_masked_capped_and_separate():
+    c, ev, _ = make(["zzsecretvalue123"])
+    c.feed({"kind": "thinking", "text": "pondering zzsecretvalue123 sk-abcdefghijklmnop1234 ok"})
+    c.feed({"kind": "text", "text": "answer"})
+    c.feed({"kind": "thinking", "text": "t" * 5000})
+    c.flush()
+    assert [e[1] for e in ev] == ["thinking", "text", "thinking"]
+    assert ev[0][2]["step"] == 1 and ev[0][2]["text"].startswith("pondering ")
+    assert "zzsecretvalue123" not in ev[0][2]["text"] and "sk-" not in ev[0][2]["text"]
+    assert ev[1][2] == {"step": 2, "text": "answer"}
+    assert len(ev[2][2]["text"]) == 4000
+
+
+def test_split_secret_in_thinking_masked_and_kept_apart_from_text():
+    c, ev, _ = make(["zzsecretvalue123"])
+    c.feed({"kind": "thinking", "text": "key zzsecret"})
+    c.feed({"kind": "thinking", "text": "value123 end"})
+    c.feed({"kind": "text", "text": "hello"})
+    c.flush()
+    assert all("zzsecret" not in str(e) and "value123" not in str(e) for e in ev)
+    assert [e[1] for e in ev] == ["thinking", "text"] and ev[1][2]["text"] == "hello"
 
 
 def test_status_never_throttled():
@@ -69,6 +100,16 @@ def test_strips_sandbox_prefix():
     c.feed({"kind": "tool", "tool": "Edit", "target": "/work/api2.py"})
     c.feed({"kind": "file", "path": "/work/src/a.py"})
     assert ev[0][2]["target"] == "api2.py" and ev[1][2]["path"] == "src/a.py"
+
+
+def test_secret_split_across_two_chunks_masked_with_rapid_events():
+    c, ev, now = make(["zzsecretvalue123"])
+    c.feed({"kind": "text", "text": "key zzsecret"})
+    now[0] = 0.01
+    c.feed({"kind": "text", "text": "value123 here"})
+    c.flush()
+    out = " ".join(e[2]["text"] for e in ev)
+    assert "zzsecret" not in out and "value123" not in out and "here" in out
 
 
 def _stream(chunks, secrets=()):
@@ -99,3 +140,18 @@ def test_configured_secret_split_across_chunks_is_masked():
 
 def test_plain_text_split_across_chunks_still_flows():
     assert "world" in _stream(["hello ", "world"])
+
+
+def test_suspect_tail_block_not_glued_to_next_text_event():
+    c, ev, _ = make()
+    c.feed({"kind": "text", "text": "Plan A"})
+    c.feed({"kind": "text", "text": "Next step"})
+    c.flush()
+    assert [e[2]["text"] for e in ev] == ["Plan A", "Next step"]
+
+
+def test_suspect_tail_block_emitted_whole_before_tool_event():
+    c, ev, _ = make()
+    c.feed({"kind": "text", "text": "Plan A"})
+    c.feed({"kind": "tool", "tool": "Edit", "target": "api.py"})
+    assert [(e[1], e[2].get("text")) for e in ev] == [("text", "Plan A"), ("tool", None)]
