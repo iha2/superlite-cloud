@@ -81,10 +81,12 @@ class Capture:
             data = str(event.get("text", ""))
             if self._carry:
                 prev, self._carry = self._carry, ""
-                if self._clean(prev + data) == self._clean(prev) + self._clean(data):
+                joined = prev + data
+                if (self._held(joined) <= len(data)
+                        and self._clean(joined) == self._clean(prev) + self._clean(data)):
                     self._emit_text(kind, self._clean(prev))
                 else:
-                    data = prev + data
+                    data = joined
             if self._held(data):
                 self._carry = data
                 return

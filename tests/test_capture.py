@@ -1,3 +1,5 @@
+import pytest
+
 from slcloud.capture import Capture
 
 
@@ -110,6 +112,22 @@ def test_secret_split_across_two_chunks_masked_with_rapid_events():
     c.flush()
     out = " ".join(e[2]["text"] for e in ev)
     assert "zzsecret" not in out and "value123" not in out and "here" in out
+
+
+@pytest.mark.parametrize("kind", ["text", "thinking"])
+def test_secret_split_across_three_events_is_masked(kind):
+    secret = "zzsecretvalue123"
+    c, ev, _ = make([secret])
+    c.feed({"kind": kind, "text": "key zzsecret"})
+    c.feed({"kind": kind, "text": "value"})
+    assert ev == []
+    c.feed({"kind": kind, "text": "123 end"})
+    c.flush()
+    texts = [e[2]["text"] for e in ev]
+    assert [e[1] for e in ev] == [kind]
+    assert secret not in "".join(texts)
+    assert all(secret not in text for text in texts)
+    assert texts == ["key ***e123 end"]
 
 
 def _stream(chunks, secrets=()):
