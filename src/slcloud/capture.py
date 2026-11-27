@@ -60,16 +60,15 @@ class Capture:
         if text:
             self._emit(kind, {"text": text[:MAX_TEXT]})
 
-    def _flush_pending(self) -> None:
-        if not self._pending:
-            return
-        pending, self._pending = self._pending, []
-        joined = "".join(raw for _, raw in pending)
-        secrets = sorted({s for s in self.secrets if s}, key=len, reverse=True)
+    def _spans(self, joined: str) -> list[tuple[int, int]]:
         spans = [m.span() for m in _SECRET.finditer(joined)]
-        if secrets:
-            pattern = re.compile("|".join(re.escape(s) for s in secrets))
-            spans.extend(m.span() for m in pattern.finditer(joined))
+        for sec in self.secrets:
+            if not sec:
+                continue
+            i = joined.find(sec)
+            while i != -1:
+                spans.append((i, i + len(sec)))
+                i = joined.find(sec, i + 1)
 
         # Merge overlapping matches so masking a crossing match cannot expose another match.
         merged = []
@@ -78,6 +77,14 @@ class Capture:
                 merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
             else:
                 merged.append((start, end))
+        return merged
+
+    def _flush_pending(self, count: int | None = None) -> None:
+        if not self._pending:
+            return
+        pending = self._pending
+        joined = "".join(raw for _, raw in pending)
+        merged = self._spans(joined)
         boundaries, offset = [], 0
         for _, raw in pending[:-1]:
             offset += len(raw)
@@ -86,7 +93,9 @@ class Capture:
                     if any(start < boundary < end for boundary in boundaries)]
 
         offset = 0
-        for kind, raw in pending:
+        count = len(pending) if count is None else count
+        self._pending = pending[count:]
+        for kind, raw in pending[:count]:
             end = offset + len(raw)
             pieces, cursor = [], offset
             for start, stop in crossing:
@@ -103,8 +112,22 @@ class Capture:
             return
         if kind in _TEXTY:
             self._pending.append((kind, str(event.get("text", ""))))
-            if not self._held("".join(raw for _, raw in self._pending)):
+            joined = "".join(raw for _, raw in self._pending)
+            held = self._held(joined)
+            if not held:
                 self._flush_pending()
+            else:
+                limit = len(joined) - held
+                spans = self._spans(joined)
+                offset, count = 0, 0
+                for i, (_, raw) in enumerate(self._pending):
+                    offset += len(raw)
+                    if 0 < offset <= limit and not any(
+                        start < offset < end for start, end in spans
+                    ):
+                        count = i + 1
+                if count:
+                    self._flush_pending(count)
             return
         self._flush_pending()
         data = {k: self._clean(rel(v) if k in ("target", "path") else v, 500)

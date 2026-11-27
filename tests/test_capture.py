@@ -198,6 +198,51 @@ def test_overlapping_provider_and_configured_secret_are_masked():
     assert [e[2]["text"] for e in ev] == ["***", "*** end"]
 
 
+def test_overlapping_configured_secrets_are_masked_across_blocks():
+    secrets = ["abcdef", "defghijklmnop"]
+    c, ev, _ = make(secrets)
+    c.feed({"kind": "text", "text": "abcdef"})
+    c.feed({"kind": "thinking", "text": "ghijklmnop end"})
+    c.flush()
+    out = "".join(e[2]["text"] for e in ev)
+    assert [e[1] for e in ev] == ["text", "thinking"]
+    assert all(secret[i:i + 4] not in out
+               for secret in secrets for i in range(len(secret) - 3))
+
+
+@pytest.mark.parametrize("kind", ["text", "thinking"])
+def test_resolved_blocks_flow_while_last_suspect_tail_is_held(kind):
+    c, ev, _ = make()
+    for text in ("Plan A", "Next step A", "Another plan A"):
+        c.feed({"kind": kind, "text": text})
+    assert [(e[1], e[2]["text"]) for e in ev] == [
+        (kind, "Plan A"), (kind, "Next step A")]
+    c.flush()
+    assert [(e[1], e[2]["text"]) for e in ev] == [
+        (kind, "Plan A"), (kind, "Next step A"), (kind, "Another plan A")]
+
+
+def test_crossing_secret_prevents_early_prefix_emission():
+    c, ev, _ = make()
+    c.feed({"kind": "text", "text": "key sk-abc"})
+    c.feed({"kind": "thinking", "text": "defghijklmnopqrstu A"})
+    assert ev == []
+    c.flush()
+    assert [(e[1], e[2]["text"]) for e in ev] == [
+        ("text", "key ***"), ("thinking", "*** A")]
+
+
+def test_resolved_crossing_secret_is_masked_before_later_held_tail():
+    c, ev, _ = make(["zzsecretvalue123"])
+    c.feed({"kind": "text", "text": "key zzsecret"})
+    c.feed({"kind": "thinking", "text": "value123 end A"})
+    c.feed({"kind": "text", "text": "Next A"})
+    assert [(e[1], e[2]["text"]) for e in ev] == [
+        ("text", "key ***"), ("thinking", "*** end A")]
+    c.flush()
+    assert ev[-1][2]["text"] == "Next A"
+
+
 def _stream(chunks, secrets=()):
     c, ev, now = make(secrets)
     for ch in chunks:
