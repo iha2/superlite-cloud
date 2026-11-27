@@ -84,7 +84,8 @@ def test_split_secret_in_thinking_masked_and_kept_apart_from_text():
     c.feed({"kind": "text", "text": "hello"})
     c.flush()
     assert all("zzsecret" not in str(e) and "value123" not in str(e) for e in ev)
-    assert [e[1] for e in ev] == ["thinking", "text"] and ev[1][2]["text"] == "hello"
+    assert [e[1] for e in ev] == ["thinking", "thinking", "text"]
+    assert [e[2]["text"] for e in ev] == ["key ***", "*** end", "hello"]
 
 
 def test_status_never_throttled():
@@ -124,10 +125,77 @@ def test_secret_split_across_three_events_is_masked(kind):
     c.feed({"kind": kind, "text": "123 end"})
     c.flush()
     texts = [e[2]["text"] for e in ev]
-    assert [e[1] for e in ev] == [kind]
+    assert [e[1] for e in ev] == [kind, kind, kind]
     assert secret not in "".join(texts)
     assert all(secret not in text for text in texts)
-    assert texts == ["key ***e123 end"]
+    assert texts == ["key ***", "***", "*** end"]
+
+
+@pytest.mark.parametrize("kinds", [("thinking", "text"), ("text", "thinking")])
+def test_secret_split_across_kinds_is_masked(kinds):
+    secret = "zzsecretvalue123"
+    c, ev, _ = make([secret])
+    c.feed({"kind": kinds[0], "text": "key zzsecret"})
+    c.feed({"kind": kinds[1], "text": "value123 end"})
+    c.flush()
+    texts = [e[2]["text"] for e in ev]
+    assert [e[1] for e in ev] == list(kinds)
+    assert texts == ["key ***", "*** end"]
+    assert secret not in "".join(texts)
+    assert all(secret not in text for text in texts)
+
+
+def test_provider_key_split_across_blocks_masks_each_piece():
+    c, ev, _ = make()
+    c.feed({"kind": "text", "text": "using sk-abcdefgh"})
+    c.feed({"kind": "thinking", "text": "ijklmnop1234 now"})
+    c.flush()
+    assert [(e[1], e[2]["text"]) for e in ev] == [
+        ("text", "using ***"), ("thinking", "*** now")]
+
+
+@pytest.mark.parametrize("kind", ["text", "thinking"])
+def test_three_block_false_alarm_preserves_blocks(kind):
+    c, ev, _ = make()
+    for text in ("Plan A", "I", "Next step"):
+        c.feed({"kind": kind, "text": text})
+    c.flush()
+    assert [(e[1], e[2]["text"]) for e in ev] == [
+        (kind, "Plan A"), (kind, "I"), (kind, "Next step")]
+
+
+def test_flush_preserves_pending_blocks_and_masks_crossing_secret():
+    c, ev, _ = make(["zzsecretvalue123"])
+    for kind, text in (("text", "key zzsecret"), ("thinking", "value123 Plan A"), ("text", "I")):
+        c.feed({"kind": kind, "text": text})
+    assert ev == []
+    c.flush()
+    assert [(e[1], e[2]["text"]) for e in ev] == [
+        ("text", "key ***"), ("thinking", "*** Plan A"), ("text", "I")]
+
+
+def test_pending_blocks_are_capped_individually():
+    c, ev, _ = make()
+    c.feed({"kind": "text", "text": "x" * 4000 + " A"})
+    c.feed({"kind": "thinking", "text": "I"})
+    c.feed({"kind": "text", "text": "Next step"})
+    assert [e[2]["text"] for e in ev] == ["x" * 4000, "I", "Next step"]
+
+
+def test_empty_block_in_crossing_secret_is_not_emitted():
+    c, ev, _ = make(["zzsecretvalue123"])
+    for text in ("key zzsecret", "", "value123 end"):
+        c.feed({"kind": "text", "text": text})
+    c.flush()
+    assert [e[2]["text"] for e in ev] == ["key ***", "*** end"]
+
+
+def test_overlapping_provider_and_configured_secret_are_masked():
+    c, ev, _ = make(["abcdefgh"])
+    c.feed({"kind": "text", "text": "sk-abcdefgh"})
+    c.feed({"kind": "thinking", "text": "ijklmnop1234 end"})
+    c.flush()
+    assert [e[2]["text"] for e in ev] == ["***", "*** end"]
 
 
 def _stream(chunks, secrets=()):

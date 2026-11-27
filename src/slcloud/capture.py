@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from slcloud.adapters import redact
+from slcloud.adapters import _SECRET, redact
 from slcloud.vault import mask
 
 MAX_TEXT = 4000
@@ -30,8 +30,7 @@ class Capture:
         self.task_id, self.add_event = task_id, add_event
         self.secrets, self.clock, self.min_gap = list(secrets), clock, min_gap
         self.step = 0
-        self._carry = ""  # raw block whose tail may be the start of a secret split across chunks
-        self._carry_kind = "text"
+        self._pending: list[tuple[str, str]] = []
 
     def _held(self, data: str) -> int:
         """Length of the tail of data that could still grow into a secret."""
@@ -61,41 +60,56 @@ class Capture:
         if text:
             self._emit(kind, {"text": text[:MAX_TEXT]})
 
-    def _flush_carry(self) -> None:
-        """Emit the held tail (masked) as its own event of the kind it came from."""
-        if self._carry:
-            carry, kind = self._carry, self._carry_kind
-            self._carry = ""
-            self._emit_text(kind, self._clean(carry))
+    def _flush_pending(self) -> None:
+        if not self._pending:
+            return
+        pending, self._pending = self._pending, []
+        joined = "".join(raw for _, raw in pending)
+        secrets = sorted({s for s in self.secrets if s}, key=len, reverse=True)
+        spans = [m.span() for m in _SECRET.finditer(joined)]
+        if secrets:
+            pattern = re.compile("|".join(re.escape(s) for s in secrets))
+            spans.extend(m.span() for m in pattern.finditer(joined))
+
+        # Merge overlapping matches so masking a crossing match cannot expose another match.
+        merged = []
+        for start, end in sorted(spans):
+            if merged and start < merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+            else:
+                merged.append((start, end))
+        boundaries, offset = [], 0
+        for _, raw in pending[:-1]:
+            offset += len(raw)
+            boundaries.append(offset)
+        crossing = [(start, end) for start, end in merged
+                    if any(start < boundary < end for boundary in boundaries)]
+
+        offset = 0
+        for kind, raw in pending:
+            end = offset + len(raw)
+            pieces, cursor = [], offset
+            for start, stop in crossing:
+                if raw and start < end and stop > offset:
+                    pieces.extend((joined[cursor:max(start, offset)], "***"))
+                    cursor = min(stop, end)
+            pieces.append(joined[cursor:end])
+            self._emit_text(kind, self._clean("".join(pieces)))
+            offset = end
 
     def feed(self, event: dict) -> None:
         kind = event.get("kind")
         if kind not in _KINDS:
             return
         if kind in _TEXTY:
-            # Each event is one complete message block. A block whose tail may start a split secret is
-            # held whole; the next event of the same kind either stands apart or joins it if a secret straddles.
-            if self._carry_kind != kind:
-                self._flush_carry()
-            self._carry_kind = kind
-            data = str(event.get("text", ""))
-            if self._carry:
-                prev, self._carry = self._carry, ""
-                joined = prev + data
-                if (self._held(joined) <= len(data)
-                        and self._clean(joined) == self._clean(prev) + self._clean(data)):
-                    self._emit_text(kind, self._clean(prev))
-                else:
-                    data = joined
-            if self._held(data):
-                self._carry = data
-                return
-            self._emit_text(kind, self._clean(data))
+            self._pending.append((kind, str(event.get("text", ""))))
+            if not self._held("".join(raw for _, raw in self._pending)):
+                self._flush_pending()
             return
-        self._flush_carry()
+        self._flush_pending()
         data = {k: self._clean(rel(v) if k in ("target", "path") else v, 500)
                 for k, v in event.items() if k != "kind"}
         self._emit(kind, data)
 
     def flush(self) -> None:
-        self._flush_carry()
+        self._flush_pending()
