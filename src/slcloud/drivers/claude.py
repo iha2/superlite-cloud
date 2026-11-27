@@ -65,6 +65,8 @@ class ClaudeDriver(Driver):
                 continue
             if block.get("type") == "text" and isinstance(block.get("text"), str):
                 out.append({"kind": "text", "text": block["text"]})
+            elif block.get("type") == "thinking" and isinstance(block.get("thinking"), str) and block["thinking"]:
+                out.append({"kind": "thinking", "text": block["thinking"]})
             elif block.get("type") == "tool_use":
                 inp = block.get("input") if isinstance(block.get("input"), dict) else {}
                 target = next((str(inp[k]) for k in _TARGETS if k in inp), "")

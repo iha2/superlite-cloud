@@ -132,6 +132,15 @@ def test_events():
     assert d.events('{"type":"result","result":"x"}') == [{"kind": "status", "status": "done"}]
 
 
+def test_events_thinking_blocks():
+    d, _, _ = make()
+    line = ('{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"},'
+            '{"type":"text","text":"ok"},{"type":"thinking","thinking":""},{"type":"thinking"},'
+            '{"type":"thinking","thinking":"more"}]}}')
+    assert d.events(line) == [{"kind": "thinking", "text": "hmm"}, {"kind": "text", "text": "ok"},
+                              {"kind": "thinking", "text": "more"}]
+
+
 def test_result_and_lines():
     out = ['{"type":"system","session_id":"s_1"}', '{"type":"result","result":"done","session_id":"s_1","is_error":false}']
     d, _, _ = make(out)
