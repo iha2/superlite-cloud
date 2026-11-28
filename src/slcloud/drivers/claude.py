@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from slcloud.adapters import CLAUDE_ISOLATION
+from slcloud.drivers.agents import AgentTracker
 from slcloud.drivers.base import Driver, _json
 
 _TARGETS = ("file_path", "path", "command", "pattern", "url", "query")
@@ -52,8 +53,13 @@ class ClaudeDriver(Driver):
 
     def events(self, line: str) -> list[dict]:
         e = _json(line)
-        if not e:
+        if not isinstance(e, dict) or not e:
             return []
+        if getattr(self, "_agents", None) is None:
+            self._agents = AgentTracker()
+        return self._line_events(e) + self._agents.feed(e)
+
+    def _line_events(self, e: dict) -> list[dict]:
         if e.get("type") == "result":
             return [{"kind": "status", "status": "error" if e.get("is_error") else "done"}]
         msg = e.get("message")

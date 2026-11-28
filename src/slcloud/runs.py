@@ -115,6 +115,8 @@ def me(store: Store, who: Principal) -> dict:
 def _doing(kind: str, data: dict) -> str | None:
     if kind == "tool":
         text = f"{data.get('tool') or ''} {rel(data.get('target')) or ''}".strip()
+    elif kind == "agent":
+        text = f"{data.get('type') or ''}: {data.get('task') or ''}".strip(": ").strip()
     else:
         text = str(data.get("text") or rel(data.get("path")) or rel(data.get("target")) or "").strip()
     return text or None
