@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from slcloud import files, filestore, gitops, names, repocache
-from slcloud.adapters import PLAN_MARKER, get_adapter, redact
+from slcloud.adapters import PLAN_MARKER, get_adapter, is_question, redact
 from slcloud.capture import Capture
 from slcloud.drivers import get_driver
 from slcloud.sandbox import Job, Mount, remove_state
@@ -320,6 +320,7 @@ def _run_task(task, deps: Deps, run_dir: str):
         cap = Capture(task.id, eng.add_live_event, secrets, deps.clock)
         driver = get_driver(task.agent, sb.start, session, slug=names.slug(task.name),
                             workdir=sb.workdir)
+        driver.orchestrator = getattr(task, "orchestrator", None) or "ai"
         try:
             driver.start(prompt)
         except BaseException:
@@ -364,7 +365,14 @@ def _run_task(task, deps: Deps, run_dir: str):
             eng.add_live_event(task.id, "result", {"text": final})
             _gate(task, deps, cache, sb, "superlite/sessions/" + names.slug(state["name"]))
             return eng.transition(task.id, "waiting", session=driver.session or res.session,
-                                  plan=mask(res.plan or res.text, secrets))
+                                  plan=mask(res.plan or res.text, secrets), waiting_on="plan")
+        if driver.orchestrator == "human" and is_question(res.text or ""):
+            lines = (res.text or "").strip().splitlines()
+            ask = mask("\n".join(lines[:-1]).strip(), secrets)  # text minus the marker line
+            eng.add_live_event(task.id, "question", {"run": task.name, "text": ask})
+            eng.add_live_event(task.id, "result", {"text": final})
+            return eng.transition(task.id, "waiting", session=driver.session or res.session,
+                                  waiting_on="question")
 
         def rename(old: str, new: str) -> str:
             new = eng.rename(task.id, new).name  # reserved against other live runs; may differ

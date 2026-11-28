@@ -78,12 +78,12 @@ def test_claude_driver_stays_in_work():
 
 
 def test_claude_driver_variadic_flag_order():
-    """--disallowedTools is variadic: a flag must follow its two tool names, --resume must not be swallowed,
+    """--disallowedTools is variadic: a flag must follow its tool names, --resume must not be swallowed,
     and the prompt goes over stdin so no positional trails the argv."""
     argv = get_driver("claude", lambda a: FakeProc(), "s_9", slug="x").argv("p")
     i = argv.index("--disallowedTools")
-    assert argv[i + 3].startswith("--")
-    assert argv.index("--resume") > i + 3
+    assert argv[i + 4].startswith("--")
+    assert argv.index("--resume") > i + 4
     assert argv[-2:] == ["--resume", "s_9"] and "p" not in argv
 
 
@@ -179,3 +179,39 @@ def test_claude_driver_note_uses_given_workdir():
     assert "open in /data/work/t1 on its branch" in note and "/work" not in note.replace("/data/work", "")
     default = get_driver("claude", lambda a: FakeProc(), None, slug="s").argv("x")
     assert "open in /work on its branch" in default[default.index("--append-system-prompt") + 1]
+
+
+_AI_NOTE = (
+    "This is a headless superlite-cloud run inside a sandbox; nobody can answer questions mid-run. The superlite "
+    "session for this run is already open in /work on its branch: its slug is `login-fix`. Build everything in /work "
+    "on that branch. Never create, enter or switch to a git worktree or another session (no `session create`, no "
+    "`--worktree`), because only /work is handed back. Whenever superlite asks you to ensure or create a session, "
+    "run `session ensure --slug login-fix` in /work instead. Leave your changes in /work; the run commits and "
+    "hands them back.")
+
+
+def test_note_ai_unchanged():
+    from slcloud.drivers.claude import headless_note
+    assert headless_note("login-fix") == _AI_NOTE
+    assert headless_note("login-fix", "/work", "ai") == _AI_NOTE
+
+
+def test_note_human():
+    from slcloud.drivers.claude import headless_note
+    n = headless_note("login-fix", "/work", "human")
+    assert n.startswith(_AI_NOTE)
+    for s in ("A human answers questions", "Reply to answer", "never use AskUserQuestion",
+              "superlite-cli orchestrator set human"):
+        assert s in n
+
+
+def test_ask_user_question_disallowed():
+    d = get_driver("claude", lambda a: FakeProc(), None, slug="x")
+    assert d.orchestrator == "ai"
+    for o in ("ai", "human"):
+        d.orchestrator = o
+        argv = d.argv("p")
+        i = argv.index("--disallowedTools")
+        assert argv[i + 1:i + 4] == ["EnterWorktree", "ExitWorktree", "AskUserQuestion"]
+        assert argv[i + 4].startswith("--")
+    assert "Reply to answer" in argv[argv.index("--append-system-prompt") + 1]

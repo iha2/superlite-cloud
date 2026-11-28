@@ -113,21 +113,20 @@ e.g. same text in an AI run: no question event, status done as today
 **Consumes:** worker.loop_once, POST /api/tasks orchestrator, respond/approve routes, event `question`
 **Produces:** live_helpers.live_ready() -> (bool, reason) (True only when `claude` is on PATH and `SLCLOUD_LIVE=1`) · live_helpers.ask_ai_human(question, timeout=120) -> str (a second `claude -p` playing the human; returns its one-line answer) · live_helpers.wait_for(client, run, pred, timeout) -> dict (polls the task json until pred holds, else TimeoutError)
 e.g. live_ready() with SLCLOUD_LIVE unset -> (False, "set SLCLOUD_LIVE=1 to run live tests")
-**Review Focus:** bounded timeouts; no secrets in logs or exceptions; no subprocess or network at import
-**Test code (contracts):** none of its own; T11 covers it
+**Review Focus:** bounded timeouts; no secrets in logs; no subprocess at import
+**Test code (contracts):** none; T11 covers it
 **Probe entry:** none
-**Notes:** Reuse the e2e setup helpers in tests/test_e2e.py by import where possible.
 
-### T11 live AI-plays-human test · Complexity 3 · Est. context 20k
+### T11 live AI-plays-human test · Complexity 2 · Est. context 16k
 **Owns:** tests/test_live_human.py
 **Components:** 1
-**LOC owned:** 60
-**Tests:** slow
+**LOC owned:** 40
+**Tests:** fast
 **Model:** sonnet
 **Consumes:** live_helpers.live_ready, live_helpers.ask_ai_human, live_helpers.wait_for
-**Produces:** tests/test_live_human.py marked `pytest.mark.slow`, skipped with live_ready()'s reason unless ready
-e.g. a Human run with real `claude -p` whose prompt asks it to ask one question ending `Reply to answer`; the test reads the `question` event, answers with ask_ai_human, responds, then on `waiting_on == "plan"` approves, and asserts the run reaches done and the next turn used the answer
-**Review Focus:** never runs in the default `-m "not slow"` suite; clear skip reason; use the real claude driver, not FAKE_CLAUDE
+**Produces:** one test marked `pytest.mark.slow`, skipped with live_ready()'s reason
+e.g. real `claude -p` asks one `Reply to answer` question; answer it with ask_ai_human, approve on `waiting_on == "plan"`, assert done
+**Review Focus:** excluded by `-m "not slow"`; real claude driver, not FAKE_CLAUDE
 **Test code (contracts):** tests/test_live_human.py
 **Probe entry:** none
 

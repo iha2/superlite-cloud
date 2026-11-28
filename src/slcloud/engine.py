@@ -21,8 +21,9 @@ ALLOWED = {
     "failed": set(),
     "cancelled": set(),
 }
-FIELDS = {"session", "plan", "answer", "result", "error", "dir"}
-PUBLIC = ("id", "name", "owner", "repo", "prompt", "agent", "base", "status", "plan", "result", "error", "created", "updated")
+FIELDS = {"session", "plan", "answer", "result", "error", "dir", "waiting_on"}
+PUBLIC = ("id", "name", "owner", "repo", "prompt", "agent", "base", "status", "plan", "result", "error", "created", "updated",
+          "orchestrator", "waiting_on")
 
 
 def _now() -> str:
@@ -48,13 +49,16 @@ class Task:
     name: str = ""
     owner: str = ""
     dir: str | None = None
+    orchestrator: str = "ai"
+    waiting_on: str | None = None
 
     @classmethod
     def from_row(cls, r: dict) -> "Task":
         res = r["result"]
         return cls(r["id"], r["workspace"], r["repo"], r["prompt"], r["agent"], r["base"], r["status"],
                    r["session"], r["plan"], r["answer"], json.loads(res) if res else None,
-                   r["error"], r["created"], r["updated"], r["name"], r["owner"], r.get("dir"))
+                   r["error"], r["created"], r["updated"], r["name"], r["owner"], r.get("dir"),
+                   r.get("orchestrator") or "ai", r.get("waiting_on"))
 
     def public(self) -> dict:
         return {k: getattr(self, k) for k in PUBLIC}
@@ -83,7 +87,9 @@ class Engine:
         return Task.from_row(rows[0])
 
     def submit(self, ws: str, repo: str, prompt: str, agent: str, base: str, *,
-               owner: str, name: str | None = None) -> Task:
+               owner: str, name: str | None = None, orchestrator: str = "ai") -> Task:
+        if orchestrator not in ("ai", "human"):
+            raise ValueError("orchestrator must be ai or human")
         get_adapter(agent)  # raises ValueError for an unknown agent
         name = names.check_name(name) if name is not None else names.make_name(prompt)
         tid = "t_" + secrets.token_hex(6)
@@ -94,9 +100,9 @@ class Engine:
                 (ws, repo))
             name = names.free_name(name, {r["name"] for r in live})
             self.store.exec(
-                "INSERT INTO tasks(id,workspace,repo,prompt,agent,base,status,created,updated,owner,name)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (tid, ws, repo, prompt, agent, base, "queued", now, now, owner, name))
+                "INSERT INTO tasks(id,workspace,repo,prompt,agent,base,status,created,updated,owner,name,orchestrator)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (tid, ws, repo, prompt, agent, base, "queued", now, now, owner, name, orchestrator))
             self._event(tid, "queued")
         task = self._load(tid)
         self._fire(task)
@@ -172,6 +178,8 @@ class Engine:
             cur = self._load(task_id)
             if status not in ALLOWED[cur.status]:
                 raise BadTransition(f"{cur.status} -> {status}")
+            if status != "waiting" and "waiting_on" not in fields:
+                fields["waiting_on"] = None  # leaving waiting clears what it waited on
             if "result" in fields and fields["result"] is not None:
                 fields["result"] = json.dumps(fields["result"])
             cols = ["status=?", "updated=?"] + [f"{k}=?" for k in fields]
@@ -186,7 +194,7 @@ class Engine:
         cur = self.get(ws, task_id)
         if cur.status != "waiting":
             raise BadTransition(f"respond needs waiting, task is {cur.status}")
-        return self.transition(task_id, "queued", answer=answer)
+        return self.transition(task_id, "queued", answer=answer, waiting_on=None)
 
     def cancel(self, ws: str, task_id: str) -> Task:
         self.get(ws, task_id)

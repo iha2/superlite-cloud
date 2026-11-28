@@ -46,3 +46,34 @@ def test_handle_unique_across_workspaces(st):
         st.exec(ins, ("m_2", "w2", "pat", "member"))
     with pytest.raises(sqlite3.IntegrityError):
         st.exec(ins, ("m_3", "w1", "pat", "member"))
+
+
+OLD_TASKS = ("CREATE TABLE tasks(id TEXT PRIMARY KEY, workspace TEXT NOT NULL, repo TEXT, prompt TEXT, agent TEXT, "
+             "base TEXT, status TEXT NOT NULL, session TEXT, plan TEXT, answer TEXT, result TEXT, error TEXT, "
+             "created TEXT, updated TEXT, owner TEXT NOT NULL, name TEXT NOT NULL, dir TEXT)")
+
+
+def _old_db(path):
+    db = sqlite3.connect(path)
+    db.execute(OLD_TASKS)
+    db.execute("INSERT INTO tasks(id,workspace,status,owner,name) VALUES('t_old','w','done','m','old')")
+    db.commit()
+    db.close()
+
+
+def test_old_db_migrates(tmp_path):
+    path = str(tmp_path / "old.db")
+    _old_db(path)
+    row = Store(path).query("SELECT * FROM tasks")[0]
+    assert row["orchestrator"] is None and row["waiting_on"] is None
+    from slcloud.engine import Engine
+    assert Engine(Store(path)).get("w", "t_old").orchestrator == "ai"
+
+
+def test_migration_idempotent(tmp_path):
+    path = str(tmp_path / "old.db")
+    _old_db(path)
+    Store(path)
+    st = Store(path)
+    cols = [r["name"] for r in st.query("PRAGMA table_info(tasks)")]
+    assert cols.count("orchestrator") == 1 and cols.count("waiting_on") == 1

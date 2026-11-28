@@ -28,7 +28,7 @@ def test_submit_public(eng):
     d = t.public()
     assert t.id.startswith("t_") and len(t.id) == 14
     assert set(d) == {"id", "name", "owner", "repo", "prompt", "agent", "base", "status", "plan",
-                      "result", "error", "created", "updated"}
+                      "result", "error", "created", "updated", "orchestrator", "waiting_on"}
     assert {k: d[k] for k in ("repo", "prompt", "agent", "base", "status", "plan", "result", "error")} == {
         "repo": "https://g/r.git", "prompt": "add x", "agent": "claude", "base": "HEAD",
         "status": "queued", "plan": None, "result": None, "error": None}
@@ -260,3 +260,41 @@ def test_rename_reserves_against_other_live_runs(eng):
     assert eng.rename(a.id, "login_fix_2").name == "login_fix_3"
     assert eng.rename(a.id, "login_fix").name == "login_fix"
     assert eng.live_names(a.id) == {"login_fix_2"}
+
+
+def test_orchestrator_default_ai(eng):
+    t = sub(eng)
+    assert t.orchestrator == "ai" and t.waiting_on is None
+
+
+def test_orchestrator_human(eng):
+    t = eng.submit("w1", "https://g/r.git", "add x", "claude", "HEAD", owner="m_1", orchestrator="human")
+    assert t.orchestrator == "human"
+
+
+def test_orchestrator_rejected(eng):
+    with pytest.raises(ValueError):
+        eng.submit("w1", "https://g/r.git", "add x", "claude", "HEAD", owner="m_1", orchestrator="robot")
+
+
+def test_public_has_fields(eng):
+    d = sub(eng).public()
+    assert d["orchestrator"] == "ai" and d["waiting_on"] is None
+
+
+def _run_waiting(eng, on):
+    t = sub(eng)
+    eng.transition(t.id, "running")
+    w = eng.transition(t.id, "waiting", session="s1", plan="p", waiting_on=on)
+    assert w.waiting_on == on
+    return t
+
+
+def test_respond_clears_waiting_on(eng):
+    t = _run_waiting(eng, "question")
+    assert eng.respond("w1", t.id, "web").waiting_on is None
+
+
+def test_cancel_clears_waiting_on(eng):
+    t = _run_waiting(eng, "plan")
+    assert eng.cancel("w1", t.id).waiting_on is None

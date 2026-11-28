@@ -7,6 +7,15 @@ import re
 from dataclasses import dataclass
 
 PLAN_MARKER = "Reply approve to start"
+QUESTION_MARKER = "Reply to answer"  # human-orchestrated runs end a turn on a question with this line
+
+
+def is_question(text: str) -> bool:
+    """True when the last non-empty line is QUESTION_MARKER and the text is not a plan (the plan wins)."""
+    if PLAN_MARKER in text:
+        return False
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return bool(lines) and lines[-1] == QUESTION_MARKER
 
 
 @dataclass

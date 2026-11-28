@@ -29,9 +29,10 @@ class FakeEngine:
         self.status, self.result = status, result
         self.calls = []
 
-    def submit(self, ws, repo, prompt, agent, base, *, owner, name=None):
+    def submit(self, ws, repo, prompt, agent, base, *, owner, name=None, orchestrator="ai"):
         self.calls.append(("submit", ws, repo, prompt, agent, base, owner))
-        return FakeTask(pub())
+        self.orchestrators = getattr(self, "orchestrators", []) + [orchestrator]
+        return FakeTask({**pub(), "orchestrator": orchestrator})
 
     def list(self, ws, owner=None):
         return [FakeTask(pub())] if ws == "w1" else []
@@ -118,6 +119,21 @@ def test_submit(make):
     t = make()
     t["submit_task"](repo="r", prompt="p")
     assert t["_eng"].calls[0][-1] == "m1"
+
+
+def test_mcp_submit_human(make):
+    t = make()
+    out = t["submit_task"](repo="r", prompt="fix the login bug", orchestrator="human")
+    assert out == {"task_id": ID, "status": "queued"}
+    t["submit_task"](repo="r", prompt="p")
+    assert t["_eng"].orchestrators == ["human", "ai"]
+
+
+def test_mcp_submit_bad_orchestrator(make):
+    t = make()
+    t["_eng"].submit = lambda *a, **k: (_ for _ in ()).throw(ValueError("orchestrator must be ai or human"))
+    assert t["submit_task"](repo="r", prompt="p", orchestrator="robot") == {
+        "error": "orchestrator must be ai or human"}
 
 
 def test_get_and_list(make):

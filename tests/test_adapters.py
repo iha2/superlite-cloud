@@ -116,3 +116,18 @@ def test_dash_prompt_not_flag(name):
 def test_bad_output_redacts_secrets():
     r = get_adapter("claude").parse("oops sk-abcdefghijklmnopqrstuvwx")
     assert "sk-abc" not in r.text and r.ok is False
+
+
+def test_is_question():
+    from slcloud.adapters import QUESTION_MARKER, is_question
+    assert QUESTION_MARKER == "Reply to answer"
+    assert is_question("Which login page: web or mobile?\nReply to answer")
+    assert is_question("Which login page: web or mobile?\nReply to answer\n\n")
+    assert not is_question("Reply to answer\nmore text after")
+    assert not is_question("all done")
+    assert not is_question("")
+
+
+def test_plan_marker_wins():
+    from slcloud.adapters import is_question
+    assert not is_question("Plan ready. Reply approve to start\nReply to answer")
