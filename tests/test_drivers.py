@@ -179,3 +179,45 @@ def test_claude_driver_note_uses_given_workdir():
     assert "open in /data/work/t1 on its branch" in note and "/work" not in note.replace("/data/work", "")
     default = get_driver("claude", lambda a: FakeProc(), None, slug="s").argv("x")
     assert "open in /work on its branch" in default[default.index("--append-system-prompt") + 1]
+
+
+def _agent_fixture():
+    from pathlib import Path
+    p = Path(__file__).parent / "fixtures" / "claude_stream_agents.jsonl"
+    return [x for x in p.read_text().splitlines() if x.strip()]
+
+
+def test_claude_agent_events_from_fixture():
+    d, _, _ = make()
+    ev = [e for ln in _agent_fixture() for e in d.events(ln)]
+    ag = [e for e in ev if e["kind"] == "agent"]
+    a, b = "toolu_01CCzTk6ChrKFXqbJGzyq8AH", "toolu_013vSWEaVAkM9DRxP7amjwkR"
+    assert [e["id"] for e in ag if e["state"] == "start"] == [a, b]
+    ends = {e["id"]: e for e in ag if e["state"] == "done"}
+    assert ends[a]["tokens"] == 17875 and ends[b]["tokens"] == 16341
+
+
+def test_tracker_per_driver():
+    d1, _, _ = make()
+    d2, _, _ = make()
+    line = json.dumps({"type": "system", "subtype": "task_started", "tool_use_id": "toolu_X"})
+    assert [e["state"] for e in d1.events(line)] == ["start"]
+    assert [e["state"] for e in d1.events(line)] == []
+    assert [e["state"] for e in d2.events(line)] == ["start"]
+
+
+def test_events_non_assistant_lines_still_parse():
+    d, _, _ = make()
+    out = d.events(json.dumps({"type": "system", "subtype": "task_started", "tool_use_id": "toolu_Y"}))
+    assert [e["kind"] for e in out] == ["agent"]
+    assert d.events("[1]") == [] and d.events("null") == []
+
+
+def test_claude_result_and_assistant_lines_unchanged_with_tracker():
+    d, _, _ = make()
+    assert d.events(json.dumps({"type": "result", "is_error": True, "result": "x"})) == [{"kind": "status", "status": "error"}]
+    a = {"type": "assistant", "message": {"id": "m", "content": [{"type": "text", "text": "hi"}]}}
+    assert d.events(json.dumps(a)) == [{"kind": "text", "text": "hi"}]
+    d.events(json.dumps({"type": "system", "subtype": "task_started", "tool_use_id": "toolu_Z"}))
+    mixed = {"type": "assistant", "message": {"content": [{"type": "text", "text": "t"}]}, "parent_tool_use_id": "toolu_Z"}
+    assert [e["kind"] for e in d.events(json.dumps(mixed))] == ["text"]

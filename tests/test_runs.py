@@ -220,3 +220,8 @@ def test_t_prefixed_name_resolves_by_name(env):
         runs.get_run(st, who["pat"], "t_fix")
     with pytest.raises(NotFound):
         runs.get_run(st, who["chris"], "t_nothing")
+
+
+def test_doing_agent():
+    assert runs._doing("agent", {"type": "implementer", "task": "T7 · panel"}) == "implementer: T7 · panel"
+    assert runs._doing("agent", {}) is None

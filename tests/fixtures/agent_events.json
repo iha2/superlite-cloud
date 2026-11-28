@@ -1,0 +1,40 @@
+[
+ {
+  "kind": "agent",
+  "id": "toolu_01CCzTk6ChrKFXqbJGzyq8AH",
+  "parent": null,
+  "type": "general-purpose",
+  "tier": "haiku",
+  "task": "Foreground ok reply",
+  "state": "start",
+  "tokens": 0
+ },
+ {
+  "kind": "agent",
+  "id": "toolu_013vSWEaVAkM9DRxP7amjwkR",
+  "parent": null,
+  "type": "general-purpose",
+  "tier": "haiku",
+  "task": "Background ok reply",
+  "state": "start",
+  "tokens": 0
+ },
+ {
+  "kind": "agent",
+  "id": "toolu_01CCzTk6ChrKFXqbJGzyq8AH",
+  "state": "done",
+  "tokens": 17875
+ },
+ {
+  "kind": "agent",
+  "id": "toolu_013vSWEaVAkM9DRxP7amjwkR",
+  "state": "update",
+  "tokens": 8
+ },
+ {
+  "kind": "agent",
+  "id": "toolu_013vSWEaVAkM9DRxP7amjwkR",
+  "state": "done",
+  "tokens": 16341
+ }
+]

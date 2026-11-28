@@ -17,7 +17,7 @@ def rel(path):
     if isinstance(path, str) and path.startswith(SANDBOX_ROOT) and len(path) > len(SANDBOX_ROOT):
         return path[len(SANDBOX_ROOT):]
     return path
-_KINDS = {"text", "thinking", "tool", "file", "status"}
+_KINDS = {"text", "thinking", "tool", "file", "status", "agent"}
 _TEXTY = ("text", "thinking")
 # A trailing key that may still grow, or a trailing start of a key marker.
 _OPEN_KEY = re.compile(r"\b(?:sk-|key-|AIza|ghp_)[A-Za-z0-9_\-]*\Z")

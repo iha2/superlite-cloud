@@ -286,3 +286,28 @@ def test_suspect_tail_block_emitted_whole_before_tool_event():
     c.feed({"kind": "text", "text": "Plan A"})
     c.feed({"kind": "tool", "tool": "Edit", "target": "api.py"})
     assert [(e[1], e[2].get("text")) for e in ev] == [("text", "Plan A"), ("tool", None)]
+
+
+def test_agent_kind_captured():
+    c, ev, _ = make()
+    c.feed({"kind": "agent", "id": "a1", "parent": None, "type": "implementer", "tier": "sonnet",
+            "task": "T7 · panel", "state": "start", "tokens": 0})
+    assert ev == [("t_1", "agent", {"step": 1, "id": "a1", "parent": None, "type": "implementer",
+                                    "tier": "sonnet", "task": "T7 · panel", "state": "start", "tokens": 0})]
+
+
+def test_agent_secret_masked():
+    c, ev, _ = make(["zzsecretvalue123"])
+    c.feed({"kind": "agent", "id": "a1", "parent": None, "type": "implementer", "tier": "sonnet",
+            "task": "T7 zzsecretvalue123 panel", "state": "start", "tokens": 0})
+    assert len(ev) == 1 and ev[0][1] == "agent"
+    assert "zzsecretvalue123" not in str(ev)
+    assert ev[0][2]["task"].startswith("T7 ") and ev[0][2]["task"].endswith(" panel")
+
+
+def test_agent_keeps_ints_and_none():
+    c, ev, _ = make()
+    c.feed({"kind": "agent", "id": "a1", "parent": None, "type": "implementer", "tier": "haiku",
+            "task": "T7", "state": "done", "tokens": 17875})
+    assert ev[0][2]["tokens"] == 17875 and isinstance(ev[0][2]["tokens"], int)
+    assert ev[0][2]["parent"] is None
