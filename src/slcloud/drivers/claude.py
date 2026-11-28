@@ -10,9 +10,21 @@ _TARGETS = ("file_path", "path", "command", "pattern", "url", "query")
 NO_WORKTREE_TOOLS = ("EnterWorktree", "ExitWorktree")
 
 
-def headless_note(slug: str | None, workdir: str = "/work") -> str:
+HUMAN_NOTE = (
+    "A human answers questions in this run, between turns: when you need a decision, end your turn with the question "
+    "as plain text and make the very last line exactly `Reply to answer`; never use AskUserQuestion. "
+    "The human owns the orchestration of this run (`superlite-cli orchestrator set human`); do not change it. "
+    "Plans still end with `Reply approve to start`.")
+
+
+def headless_note(slug: str | None, workdir: str = "/work", orchestrator: str = "ai") -> str:
     """System-prompt note: keep superlite in the run's working directory, where the worker opened its
     session and hands back from (/work in a container, the run directory under the process runner)."""
+    note = _ai_note(slug, workdir)
+    return note + " " + HUMAN_NOTE if orchestrator == "human" else note
+
+
+def _ai_note(slug: str | None, workdir: str) -> str:
     session = f"`{slug}`" if slug else f"the one already open in {workdir}"
     return ("This is a headless superlite-cloud run inside a sandbox; nobody can answer questions mid-run. "
             f"The superlite session for this run is already open in {workdir} on its branch: its slug is {session}. "
@@ -24,6 +36,7 @@ def headless_note(slug: str | None, workdir: str = "/work") -> str:
 
 class ClaudeDriver(Driver):
     name = "claude"
+    orchestrator = "ai"  # the worker sets it from the task
 
     def argv(self, prompt: str) -> list[str]:
         # Same isolation as ClaudeAdapter (see adapters.CLAUDE_ISOLATION and SECURITY.md).
@@ -31,8 +44,8 @@ class ClaudeDriver(Driver):
                 "--input-format", "stream-json", "--output-format", "stream-json",
                 "--verbose", "--permission-mode", "bypassPermissions",
                 # Hand-back commits the run's working directory only: work done in a worktree would be lost.
-                "--disallowedTools", *NO_WORKTREE_TOOLS,
-                "--append-system-prompt", headless_note(self.slug, self.workdir)]
+                "--disallowedTools", *NO_WORKTREE_TOOLS, "AskUserQuestion",
+                "--append-system-prompt", headless_note(self.slug, self.workdir, self.orchestrator)]
         if self.session:
             argv += ["--resume", self.session]
         return argv

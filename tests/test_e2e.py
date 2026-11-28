@@ -48,6 +48,10 @@ FAKE_CLAUDE = textwrap.dedent("""\
     text = "all done"
     if prompt.startswith("plan"):
         text = "Plan ready. Reply approve to start"
+    if prompt.startswith("ask"):
+        text = "Which login page: web or mobile?\\nReply to answer"
+    if prompt == "web":
+        text = "Plan ready. Reply approve to start"
     if prompt.startswith("wait"):
         say({{"type": "assistant", "session_id": "s1", "message": {{"content": [
             {{"type": "text", "text": "waiting for you"}}]}}}})
@@ -144,6 +148,28 @@ def test_flow_approve(env):
     assert t["result"]["pushed"] is True
     assert t["result"]["branch"] in git("branch", cwd=remote)
     assert not loop_once(app.state.worker_deps)
+
+
+def test_flow_human_question_then_plan(env):
+    client, app, remote, h, *_ = env
+    row = app.state.store.query("SELECT id, workspace FROM members WHERE handle='chris'")[0]
+    t = app.state.engine.submit(row["workspace"], remote, "ask fix the login bug", "claude", "main",
+                                owner=row["id"], name="login_fix", orchestrator="human")
+    tid = t.id
+    assert loop_once(app.state.worker_deps)
+    t = client.get(f"/api/tasks/{tid}", headers=h).json()
+    assert (t["status"], t["waiting_on"], t["orchestrator"]) == ("waiting", "question", "human")
+    q = [e for e in client.get(f"/api/tasks/{tid}/events", headers=h).json() if e["kind"] == "question"]
+    assert q[0]["data"] == {"run": "login_fix", "text": "Which login page: web or mobile?"}
+    r = client.post(f"/api/tasks/{tid}/respond", json={"answer": "web"}, headers=h).json()
+    assert (r["status"], r["waiting_on"]) == ("queued", None)
+    assert loop_once(app.state.worker_deps)
+    t = client.get(f"/api/tasks/{tid}", headers=h).json()
+    assert (t["status"], t["waiting_on"]) == ("waiting", "plan") and "Reply approve to start" in t["plan"]
+    client.post(f"/api/tasks/{tid}/respond", json={"answer": "approve"}, headers=h)
+    assert loop_once(app.state.worker_deps)
+    t = client.get(f"/api/tasks/{tid}", headers=h).json()
+    assert t["status"] == "done" and t["result"]["pushed"] is True
 
 
 def test_changes_revised_plan(env):

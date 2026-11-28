@@ -45,6 +45,14 @@ FAKE_CLAUDE = textwrap.dedent('''\
         time.sleep(60)
     if prompt.startswith("plan"):
         text = "Plan ready. Reply approve to start"
+    if prompt.startswith("ask"):
+        text = "Which login page: web or mobile?\\nReply to answer"
+    if prompt.startswith("leakq"):
+        text = prompt + "\\nReply to answer"
+    if prompt.startswith("both"):
+        text = "Plan ready. Reply approve to start\\nReply to answer"
+    if prompt == "web":
+        text = "Plan ready. Reply approve to start"
     if prompt.startswith("wait"):
         say({{"type": "assistant", "session_id": sess, "message": {{"content": [
             {{"type": "text", "text": "waiting for you"}}]}}}})
@@ -456,3 +464,62 @@ def test_sandbox_workdir_per_runner(env):
     assert sb.workdir == "/data/work/t1"  # process runner
     sb.deps = SimpleNamespace(runner=DockerRunner(), settings=env.deps.settings)
     assert sb.workdir == "/work"
+
+
+Q = "Which login page: web or mobile?"
+
+
+def submit_as(env, prompt, orchestrator, name="login_fix"):
+    env.eng.submit("w1", env.origin, prompt, "claude", "main", owner=env.chris, name=name,
+                   orchestrator=orchestrator)
+    return env.eng.claim()
+
+
+def test_question_waits(env):
+    t = submit_as(env, "ask fix the login bug", "human")
+    r = worker.run_task(t, env.deps)
+    assert (r.status, r.waiting_on) == ("waiting", "question")
+    q = [e for e in env.eng.events(t.id) if e["kind"] == "question"]
+    assert len(q) == 1 and q[0]["data"] == {"run": "login_fix", "text": Q}
+    assert not r.plan
+
+
+def test_question_ignored_for_ai(env):
+    t = submit_as(env, "ask fix the login bug", "ai")
+    r = worker.run_task(t, env.deps)
+    assert r.status == "done", r.error
+    assert not [e for e in env.eng.events(t.id) if e["kind"] == "question"]
+
+
+def test_answer_resumes(env):
+    t = submit_as(env, "ask fix the login bug", "human")
+    worker.run_task(t, env.deps)
+    assert env.eng.respond("w1", t.id, "web").waiting_on is None
+    r = worker.run_task(env.eng.claim(), env.deps)
+    calls = [json.loads(x) for x in open(env.tmp / "claude.log")]
+    assert calls[1][calls[1].index("--resume") + 1] == "s_abc"
+    assert "web" in open(os.path.join(env.deps.settings.work_dir, t.id, "out.txt")).read().split()
+    assert r.status == "waiting"
+
+
+def test_plan_sets_waiting_on_plan(env):
+    t = submit_as(env, "ask fix the login bug", "human")
+    worker.run_task(t, env.deps)
+    env.eng.respond("w1", t.id, "web")
+    r = worker.run_task(env.eng.claim(), env.deps)
+    assert (r.status, r.waiting_on) == ("waiting", "plan") and "Reply approve to start" in r.plan
+
+
+def test_plan_wins_over_question_marker(env):
+    t = submit_as(env, "both x", "human")
+    r = worker.run_task(t, env.deps)
+    assert (r.status, r.waiting_on) == ("waiting", "plan")
+    assert not [e for e in env.eng.events(t.id) if e["kind"] == "question"]
+
+
+def test_question_text_masks_secret(env):
+    t = submit_as(env, f"leakq {KEY}", "human")
+    r = worker.run_task(t, env.deps)
+    assert r.waiting_on == "question", r.error
+    q = [e["data"]["text"] for e in env.eng.events(t.id) if e["kind"] == "question"]
+    assert q and KEY not in q[0]

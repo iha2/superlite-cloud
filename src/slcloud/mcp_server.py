@@ -40,9 +40,13 @@ def tools(engine, store, settings, whoami) -> dict:
         return whoami().workspace
 
     @guard
-    def submit_task(repo: str, prompt: str, agent: str = "claude", base: str = "HEAD"):
-        """Queue a task: the agent plans first and waits for approval."""
-        t = engine.submit(ws(), repo, prompt, agent, base, owner=whoami().member).public()
+    def submit_task(repo: str, prompt: str, agent: str = "claude", base: str = "HEAD",
+                    orchestrator: str = "ai"):
+        """Queue a task: the agent plans first and waits for approval.
+
+        orchestrator "human" makes the run stop on questions and the plan until you reply."""
+        t = engine.submit(ws(), repo, prompt, agent, base, owner=whoami().member,
+                          orchestrator=orchestrator).public()
         return {"task_id": t["id"], "status": t["status"]}
 
     @guard

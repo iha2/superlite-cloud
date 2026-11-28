@@ -12,7 +12,7 @@ from slcloud.store import Store
 from slcloud.webhooks import Notifier, sign
 
 PUB = {"id": "t_0123456789ab", "repo": "r", "prompt": "p", "agent": "claude", "base": "HEAD",
-       "status": "queued", "plan": None, "result": None, "error": None, "created": "c", "updated": "u"}
+       "status": "queued", "orchestrator": "ai", "waiting_on": None, "plan": None, "result": None, "error": None, "created": "c", "updated": "u"}
 
 
 class FakeTask:
@@ -36,9 +36,12 @@ class FakeEngine:
         self.submitted = []
         self.listed = []
 
-    def submit(self, ws, repo, prompt, agent, base, *, owner, name=None):
-        self.submitted.append({"owner": owner, "name": name})
-        return FakeTask(repo=repo, prompt=prompt, agent=agent, base=base, owner=owner)
+    def submit(self, ws, repo, prompt, agent, base, *, owner, name=None, orchestrator="ai"):
+        if orchestrator not in ("ai", "human"):
+            raise ValueError("orchestrator must be ai or human")
+        self.submitted.append({"owner": owner, "name": name, "orchestrator": orchestrator})
+        return FakeTask(repo=repo, prompt=prompt, agent=agent, base=base, owner=owner,
+                        orchestrator=orchestrator, waiting_on=None)
 
     def list(self, ws, owner=None):
         self.listed.append(owner)
@@ -104,6 +107,29 @@ def test_health_and_task_routes():
     assert c.post(f"/api/tasks/{PUB['id']}/cancel").json()["status"] == "cancelled"
     assert c.get(f"/api/tasks/{PUB['id']}/events").json()[0]["kind"] == "status"
     assert c.get(f"/api/tasks/{PUB['id']}/bundle").status_code == 404
+
+
+def test_submit_orchestrator_human():
+    eng = FakeEngine()
+    c, _ = client(engine=eng)
+    r = c.post("/api/tasks", json={"repo": "r", "prompt": "fix the login bug", "orchestrator": "human"})
+    assert r.status_code == 200 and r.json()["orchestrator"] == "human"
+    assert eng.submitted[-1]["orchestrator"] == "human"
+    c.post("/api/tasks", json={"repo": "r", "prompt": "p"})
+    assert eng.submitted[-1]["orchestrator"] == "ai"
+
+
+def test_submit_orchestrator_rejected():
+    eng = FakeEngine()
+    c, _ = client(engine=eng)
+    r = c.post("/api/tasks", json={"repo": "r", "prompt": "p", "orchestrator": "robot"})
+    assert r.status_code == 400 and eng.submitted == []
+
+
+def test_list_has_orchestrator():
+    c, _ = client()
+    row = c.get("/api/tasks").json()[0]
+    assert row["orchestrator"] == "ai" and row["waiting_on"] is None
 
 
 def test_not_found_404():

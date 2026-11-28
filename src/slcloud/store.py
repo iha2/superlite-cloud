@@ -32,6 +32,11 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         with self._lock:
             self._db.executescript(SCHEMA)
+            for col in ("orchestrator", "waiting_on"):
+                try:
+                    self._db.execute(f"ALTER TABLE tasks ADD COLUMN {col} TEXT")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
             self._db.commit()
 
     def query(self, sql: str, params: tuple = ()) -> list[dict]:

@@ -73,7 +73,8 @@ def create_app(settings: Settings, store: Store, engine, whoami) -> FastAPI:
         # the owner is always the caller; a body "owner" is ignored
         try:
             t = engine.submit(p.workspace, repo, prompt, body.get("agent", "claude"), body.get("base", "HEAD"),
-                              owner=p.member, name=body.get("name"))
+                              owner=p.member, name=body.get("name"),
+                              orchestrator=body.get("orchestrator", "ai"))
         except ValueError as e:  # bad name or unknown agent: the client's mistake, not a 500
             raise Rejected(str(e)) from None
         return t.public()

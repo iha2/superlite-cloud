@@ -21,3 +21,6 @@ work/
 
 # superlite: dependency, build and cache folders
 .superlite/sandboxes/
+
+# superlite: dependency, build and cache folders
+.claude/
